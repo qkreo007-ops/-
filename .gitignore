@@ -1,0 +1,30 @@
+# Environment variables (Supabase Keys & Secrets)
+.env
+.env.local
+.env.*.local
+
+# SQLite Database & temporary WAL files
+*.db
+*.db-shm
+*.db-wal
+tutormark.db
+
+# Local uploads storage
+uploads/
+!uploads/.gitkeep
+
+# Python cache & virtual environment
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Test output screenshots
+screenshots/
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db

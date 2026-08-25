@@ -1,0 +1,618 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TutorMark - 과외/멘토링 사진 과제 첨삭 노트 (Supabase 다중 사진 지원)</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons CDN -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Custom Styles -->
+  <link rel="stylesheet" href="/static/css/styles.css">
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-800 flex flex-col">
+
+  <!-- Global Toast Notification -->
+  <div id="global-toast" class="hidden">
+    <div id="toast-icon"></div>
+    <span id="toast-text"></span>
+  </div>
+
+  <!-- Top Navigation Bar -->
+  <header class="sticky top-0 z-40 bg-white/90 backdrop-blur-md border-b border-slate-200 shadow-xs">
+    <div class="max-w-6xl mx-auto px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-white shadow-md">
+          <i data-lucide="pen-tool" class="w-5 h-5"></i>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="font-extrabold text-lg text-slate-900 tracking-tight">TutorMark</h1>
+            <span id="current-role-badge" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-blue-100 text-blue-800">
+              학생 모드
+            </span>
+            <!-- Supabase Status Badge -->
+            <div id="supabase-status-badge" class="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-slate-100 text-slate-600 border border-slate-200 flex items-center gap-1.5 cursor-pointer">
+              <span>연결 확인 중...</span>
+            </div>
+          </div>
+          <p class="text-xs text-slate-500">줌 과외·멘토링 사진 과제 및 실시간 첨삭 피드백</p>
+        </div>
+      </div>
+
+      <!-- Role Mode Switcher Tabs -->
+      <div class="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+        <button id="btn-mode-student" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 bg-blue-600 text-white shadow-xs">
+          <i data-lucide="camera" class="w-3.5 h-3.5"></i>
+          <span>학생 모드 (과제 올리기)</span>
+        </button>
+        <button id="btn-mode-teacher" class="px-3.5 py-1.5 rounded-lg text-xs font-bold transition flex items-center gap-1.5 text-slate-600 hover:text-slate-900">
+          <i data-lucide="shield-check" class="w-3.5 h-3.5"></i>
+          <span>교사용 모드 (관리자 첨삭)</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content Container -->
+  <main class="flex-1 max-w-6xl w-full mx-auto p-4 md:p-6">
+
+    <!-- ========================================== -->
+    <!-- 1. STUDENT VIEW (학생용 화면) -->
+    <!-- ========================================== -->
+    <div id="student-view" class="space-y-6">
+      
+      <!-- Student Selector Bar -->
+      <div class="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-3">
+        <div class="flex items-center gap-2">
+          <span class="text-xs font-bold text-slate-500 uppercase tracking-wider">현재 학생 선택:</span>
+          <div id="student-chips-container" class="flex flex-wrap items-center gap-2">
+            <!-- Student chips rendered dynamically -->
+          </div>
+        </div>
+        <button onclick="promptAddStudent()" class="text-xs font-semibold text-blue-600 hover:text-blue-700 flex items-center gap-1 px-3 py-1.5 rounded-lg hover:bg-blue-50 border border-blue-200 transition">
+          <i data-lucide="user-plus" class="w-3.5 h-3.5"></i> 학생 추가
+        </button>
+      </div>
+
+      <!-- Photo Upload Section (Multi-Photo) -->
+      <div class="bg-white rounded-3xl p-6 md:p-8 border border-slate-200 shadow-sm">
+        <div class="flex items-center justify-between mb-5">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold">
+              <i data-lucide="images" class="w-5 h-5"></i>
+            </div>
+            <div>
+              <h2 class="text-lg font-bold text-slate-900">공부한 문제집·시험지 사진 찍어 올리기 (여러 장 가능)</h2>
+              <p class="text-xs text-slate-500">한 번에 여러 장을 촬영하거나 갤러리에서 선택할 수 있습니다.</p>
+            </div>
+          </div>
+          <span id="student-photo-count-badge" class="hidden px-3 py-1 text-xs font-bold rounded-full bg-blue-600 text-white">
+            0장 선택됨
+          </span>
+        </div>
+
+        <form id="submission-form" class="space-y-5">
+          <!-- File Input & Drop Zone -->
+          <div class="border-2 border-dashed border-blue-200 hover:border-blue-400 bg-blue-50/40 hover:bg-blue-50/70 rounded-2xl p-6 text-center transition cursor-pointer relative group">
+            <input type="file" id="student-photo-input" accept="image/*" capture="environment" multiple class="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10">
+            
+            <div class="flex flex-col items-center justify-center pointer-events-none">
+              <div class="w-14 h-14 rounded-2xl bg-blue-600 text-white flex items-center justify-center mb-3 shadow-md group-hover:scale-110 transition pulse-subtle">
+                <i data-lucide="camera" class="w-7 h-7"></i>
+              </div>
+              <p class="font-bold text-slate-800 text-base mb-1">여기를 터치하여 사진 촬영 또는 사진 여러 장 선택</p>
+              <p class="text-xs text-slate-500">여러 장을 계속해서 추가 촬영할 수 있습니다 (JPG, PNG, HEIC 지원)</p>
+            </div>
+          </div>
+
+          <!-- Multi-Photo Gallery Preview Strip -->
+          <div id="photo-preview-container" class="hidden space-y-3 bg-slate-900 p-4 rounded-2xl border border-slate-800">
+            <div class="flex items-center justify-between text-white">
+              <span class="text-xs font-bold text-emerald-400 flex items-center gap-1.5">
+                <i data-lucide="check-circle" class="w-4 h-4"></i> 선택된 과제 사진 목록
+              </span>
+              <label for="student-photo-input-extra" class="text-xs font-semibold text-blue-300 hover:text-white bg-slate-800 hover:bg-slate-700 px-3 py-1.5 rounded-lg border border-slate-700 cursor-pointer flex items-center gap-1 transition">
+                <i data-lucide="plus" class="w-3.5 h-3.5"></i> 사진 추가 촬영
+              </label>
+              <input type="file" id="student-photo-input-extra" accept="image/*" capture="environment" multiple class="hidden">
+            </div>
+
+            <!-- Thumbnails grid -->
+            <div id="photo-thumbnails-grid" class="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
+              <!-- Rendered dynamically -->
+            </div>
+          </div>
+
+          <!-- Metadata Inputs -->
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1.5">과목 선택</label>
+              <select id="submission-subject" class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none">
+                <option value="수학">수학</option>
+                <option value="영어">영어</option>
+                <option value="국어">국어</option>
+                <option value="과학">과학</option>
+                <option value="사회/한국사">사회/한국사</option>
+                <option value="기타">기타 과제</option>
+              </select>
+            </div>
+
+            <div class="md:col-span-2">
+              <label class="block text-xs font-bold text-slate-700 mb-1.5">과제 제목 / 범위 <span class="text-rose-500">*</span></label>
+              <input type="text" id="submission-title" placeholder="예: 쎈 수학 38~40페이지 풀이" required
+                     class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none">
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1.5">선생님께 남길 질문이나 메모 (선택사항)</label>
+            <textarea id="submission-memo" rows="2" placeholder="예: 2페이지 5번 문제 풀이과정에서 왜 -4가 나오는지 헷갈려요!"
+                      class="w-full bg-slate-50 border border-slate-200 rounded-xl px-3.5 py-2.5 text-sm font-medium focus:ring-2 focus:ring-blue-500 focus:outline-none resize-none"></textarea>
+          </div>
+
+          <button type="submit" id="btn-submit-work" class="w-full py-3.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-sm rounded-xl shadow-md hover:shadow-lg transition flex items-center justify-center gap-2">
+            <i data-lucide="upload" class="w-4 h-4"></i> 선생님께 사진 과제 제출하기
+          </button>
+        </form>
+      </div>
+
+      <!-- Submissions List Section -->
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <h2 class="text-lg font-bold text-slate-900">제출한 과제 및 첨삭 피드백</h2>
+          </div>
+          
+          <!-- Status Filter Tabs -->
+          <div class="flex items-center gap-1.5 bg-white p-1 rounded-xl border border-slate-200">
+            <button onclick="setStatusFilter('all')" data-status="all" class="status-filter-btn px-3 py-1 rounded-lg text-xs font-bold bg-blue-600 text-white transition">전체</button>
+            <button onclick="setStatusFilter('reviewed')" data-status="reviewed" class="status-filter-btn px-3 py-1 rounded-lg text-xs font-bold bg-gray-100 text-gray-600 hover:bg-gray-200 transition">첨삭완료</button>
+            <button onclick="setStatusFilter('pending')" data-status="pending" class="status-filter-btn px-3 py-1 rounded-lg text-xs font-bold bg-gray-100 text-gray-600 hover:bg-gray-200 transition">확인 대기중</button>
+          </div>
+        </div>
+
+        <div id="student-submissions-list" class="space-y-4">
+          <!-- Submission items rendered dynamically -->
+        </div>
+      </div>
+
+    </div>
+
+    <!-- ========================================== -->
+    <!-- 2. TEACHER / ADMIN VIEW (선생님 화면) -->
+    <!-- ========================================== -->
+    <div id="teacher-view" class="hidden space-y-6">
+
+      <!-- Teacher Dashboard Stats Cards -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div class="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex items-center gap-4">
+          <div class="w-12 h-12 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center">
+            <i data-lucide="folder-kanban" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <p class="text-xs font-semibold text-slate-500">전체 제출 과제</p>
+            <h3 id="stat-total-submissions" class="text-2xl font-extrabold text-slate-900">0</h3>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl p-5 border border-rose-200 shadow-xs flex items-center gap-4">
+          <div class="w-12 h-12 rounded-xl bg-rose-100 text-rose-700 flex items-center justify-center">
+            <i data-lucide="alert-circle" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <p class="text-xs font-semibold text-rose-600">미첨삭 (대기중)</p>
+            <h3 id="stat-pending-submissions" class="text-2xl font-extrabold text-rose-600">0</h3>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl p-5 border border-emerald-200 shadow-xs flex items-center gap-4">
+          <div class="w-12 h-12 rounded-xl bg-emerald-100 text-emerald-700 flex items-center justify-center">
+            <i data-lucide="check-circle-2" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <p class="text-xs font-semibold text-emerald-600">첨삭 완료</p>
+            <h3 id="stat-reviewed-submissions" class="text-2xl font-extrabold text-emerald-700">0</h3>
+          </div>
+        </div>
+
+        <div class="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs flex items-center gap-4">
+          <div class="w-12 h-12 rounded-xl bg-blue-100 text-blue-700 flex items-center justify-center">
+            <i data-lucide="users" class="w-6 h-6"></i>
+          </div>
+          <div>
+            <p class="text-xs font-semibold text-slate-500">등록 과외 학생</p>
+            <h3 id="stat-student-count" class="text-2xl font-extrabold text-slate-900">0</h3>
+          </div>
+        </div>
+      </div>
+
+      <!-- Teacher Controls & Filter Bar -->
+      <div class="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs flex flex-wrap items-center justify-between gap-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="text-xs font-bold text-slate-500">학생 필터:</span>
+          <div id="teacher-student-filter" class="flex flex-wrap items-center gap-1.5">
+            <!-- Student filters rendered dynamically -->
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2">
+          <button onclick="promptAddStudent()" class="text-xs font-semibold text-purple-600 hover:text-purple-700 flex items-center gap-1 px-3 py-1.5 rounded-lg hover:bg-purple-50 border border-purple-200 transition">
+            <i data-lucide="user-plus" class="w-3.5 h-3.5"></i> 새 학생 등록
+          </button>
+          <button onclick="openSupabaseGuideModal()" class="text-xs font-semibold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 px-3 py-1.5 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 transition">
+            <i data-lucide="database" class="w-3.5 h-3.5"></i> Supabase 연동 설정
+          </button>
+        </div>
+      </div>
+
+      <!-- Submissions List for Teacher -->
+      <div class="space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-lg font-bold text-slate-900">학생 과제 목록 및 첨삭 관리</h2>
+          <p class="text-xs text-slate-500">사진을 클릭하거나 [첨삭하기] 버튼을 누르면 줌 화면공유용 캔버스 에디터가 열립니다.</p>
+        </div>
+
+        <div id="teacher-submissions-list" class="space-y-4">
+          <!-- Teacher submission items rendered dynamically -->
+        </div>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- ======================================================= -->
+  <!-- 3. FULLSCREEN CANVAS ANNOTATION STUDIO MODAL (교사 첨삭) -->
+  <!-- ======================================================= -->
+  <div id="canvas-editor-modal" class="hidden fixed inset-0 z-50 bg-slate-950/95 flex flex-col backdrop-blur-sm">
+    
+    <!-- Top Toolbar Header -->
+    <div class="bg-slate-900 border-b border-slate-800 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-white">
+      <div class="flex items-center gap-3">
+        <div class="w-8 h-8 rounded-lg bg-purple-600 flex items-center justify-center">
+          <i data-lucide="edit-3" class="w-4 h-4 text-white"></i>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <span id="canvas-student-info" class="text-xs font-bold px-2 py-0.5 rounded bg-purple-900/80 text-purple-300 border border-purple-700"></span>
+            <h3 id="canvas-submission-title" class="text-sm font-bold text-slate-100 truncate max-w-xs md:max-w-md"></h3>
+          </div>
+        </div>
+      </div>
+
+      <!-- Page Switcher Bar for Multi-Page Submissions -->
+      <div id="canvas-page-switcher" class="flex items-center gap-2 bg-slate-800 px-3 py-1 rounded-xl border border-slate-700">
+        <button id="btn-canvas-prev-page" class="p-1 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition" title="이전 페이지">
+          <i data-lucide="chevron-left" class="w-4 h-4"></i>
+        </button>
+        <span id="canvas-page-indicator" class="text-xs font-bold text-purple-300 min-w-[80px] text-center">
+          1 / 1 페이지
+        </span>
+        <button id="btn-canvas-next-page" class="p-1 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition" title="다음 페이지">
+          <i data-lucide="chevron-right" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <!-- Zoom & Viewport Controls -->
+      <div class="flex items-center gap-1.5 bg-slate-800 p-1 rounded-xl border border-slate-700">
+        <button id="btn-zoom-out" class="p-1.5 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition" title="축소">
+          <i data-lucide="zoom-out" class="w-4 h-4"></i>
+        </button>
+        <span id="zoom-percentage-text" class="text-xs font-bold px-2 text-slate-300 min-w-[50px] text-center">100%</span>
+        <button id="btn-zoom-in" class="p-1.5 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition" title="확대">
+          <i data-lucide="zoom-in" class="w-4 h-4"></i>
+        </button>
+        <div class="w-[1px] h-4 bg-slate-700 mx-1"></div>
+        <button id="btn-zoom-fit" class="px-2.5 py-1 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">화면 맞춤</button>
+        <button id="btn-zoom-100" class="px-2.5 py-1 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 hover:text-white transition">100%</button>
+      </div>
+
+      <!-- History & Close -->
+      <div class="flex items-center gap-2">
+        <div class="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700">
+          <button id="btn-canvas-undo" class="p-1.5 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition" title="실행 취소 (Ctrl+Z)">
+            <i data-lucide="undo" class="w-4 h-4"></i>
+          </button>
+          <button id="btn-canvas-redo" class="p-1.5 hover:bg-slate-700 rounded-lg text-slate-300 hover:text-white transition" title="다시 실행 (Ctrl+Y)">
+            <i data-lucide="redo" class="w-4 h-4"></i>
+          </button>
+          <div class="w-[1px] h-4 bg-slate-700 mx-1"></div>
+          <button id="btn-canvas-clear" class="p-1.5 hover:bg-red-900/50 text-slate-300 hover:text-red-400 rounded-lg transition" title="전체 지우기">
+            <i data-lucide="trash-2" class="w-4 h-4"></i>
+          </button>
+        </div>
+
+        <button onclick="closeCanvasEditor()" class="p-2 hover:bg-slate-800 rounded-xl text-slate-400 hover:text-white transition">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Main Canvas Studio Body -->
+    <div class="flex-1 flex overflow-hidden relative">
+      
+      <!-- Left Floating Tool Palette -->
+      <div class="absolute top-4 left-4 z-20 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-2xl p-2.5 flex flex-col gap-2 shadow-2xl">
+        
+        <!-- Primary Drawing Tools -->
+        <div class="flex flex-col gap-1">
+          <button class="canvas-tool-btn active tool-btn p-2 rounded-xl text-slate-300 hover:bg-slate-800 transition flex items-center gap-2" data-tool="pen" title="일반 펜 (Pen)">
+            <i data-lucide="pencil" class="w-4 h-4"></i>
+          </button>
+          <button class="canvas-tool-btn tool-btn p-2 rounded-xl text-slate-300 hover:bg-slate-800 transition flex items-center gap-2" data-tool="highlighter" title="형광펜 (Highlighter)">
+            <i data-lucide="highlighter" class="w-4 h-4"></i>
+          </button>
+          <button class="canvas-tool-btn tool-btn p-2 rounded-xl text-slate-300 hover:bg-slate-800 transition flex items-center gap-2" data-tool="text" title="키보드 글자 타이핑 (Text)">
+            <i data-lucide="type" class="w-4 h-4"></i>
+          </button>
+          <button class="canvas-tool-btn tool-btn p-2 rounded-xl text-slate-300 hover:bg-slate-800 transition flex items-center gap-2" data-tool="pan" title="화면 이동 손도구 (Space+드래그)">
+            <i data-lucide="hand" class="w-4 h-4"></i>
+          </button>
+        </div>
+
+        <div class="w-full h-[1px] bg-slate-800 my-0.5"></div>
+
+        <!-- Grading Quick Stamps -->
+        <div class="grid grid-cols-2 gap-1">
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-rose-400 hover:bg-slate-800 transition font-bold text-xs" data-tool="grade-o" title="채점 정답 (O)">⭕</button>
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-rose-400 hover:bg-slate-800 transition font-bold text-xs" data-tool="grade-x" title="채점 틀림 (X)">❌</button>
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-emerald-400 hover:bg-slate-800 transition font-bold text-xs" data-tool="grade-check" title="확인 체크 (V)">✔️</button>
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center justify-center" data-tool="eraser" title="지우개">
+            <i data-lucide="eraser" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+
+        <div class="w-full h-[1px] bg-slate-800 my-0.5"></div>
+
+        <!-- Shapes -->
+        <div class="grid grid-cols-2 gap-1">
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center justify-center" data-tool="arrow" title="화살표">
+            <i data-lucide="arrow-up-right" class="w-3.5 h-3.5"></i>
+          </button>
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center justify-center" data-tool="rect" title="사각형 박스">
+            <i data-lucide="square" class="w-3.5 h-3.5"></i>
+          </button>
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center justify-center" data-tool="circle" title="동그라미">
+            <i data-lucide="circle" class="w-3.5 h-3.5"></i>
+          </button>
+          <button class="canvas-tool-btn tool-btn p-1.5 rounded-lg text-slate-300 hover:bg-slate-800 transition flex items-center justify-center" data-tool="line" title="직선">
+            <i data-lucide="minus" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+
+        <div class="w-full h-[1px] bg-slate-800 my-0.5"></div>
+
+        <!-- Colors Palette -->
+        <div class="grid grid-cols-4 gap-1.5 p-1">
+          <button class="canvas-color-swatch active w-5 h-5 rounded-full bg-red-500" data-color="#ef4444" title="빨강"></button>
+          <button class="canvas-color-swatch w-5 h-5 rounded-full bg-blue-500" data-color="#3b82f6" title="파랑"></button>
+          <button class="canvas-color-swatch w-5 h-5 rounded-full bg-emerald-500" data-color="#10b981" title="초록"></button>
+          <button class="canvas-color-swatch w-5 h-5 rounded-full bg-amber-400" data-color="#f59e0b" title="노랑"></button>
+          <button class="canvas-color-swatch w-5 h-5 rounded-full bg-purple-500" data-color="#a855f7" title="보라"></button>
+          <button class="canvas-color-swatch w-5 h-5 rounded-full bg-orange-500" data-color="#f97316" title="주황"></button>
+          <button class="canvas-color-swatch w-5 h-5 rounded-full bg-slate-900 border border-slate-600" data-color="#0f172a" title="검정"></button>
+          <input type="color" id="canvas-custom-color" value="#ef4444" class="w-5 h-5 rounded-full cursor-pointer bg-transparent border-0" title="직접 색상 선택">
+        </div>
+
+        <!-- Stroke / Font Controls -->
+        <div class="pt-1 text-[10px] text-slate-400 font-semibold space-y-1.5">
+          <div>
+            <div class="flex justify-between"><span>굵기</span><span id="stroke-width-val">4px</span></div>
+            <input type="range" id="stroke-width-slider" min="2" max="24" value="4" class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer">
+          </div>
+          <div>
+            <div class="flex justify-between"><span>글자</span><span id="font-size-val">20px</span></div>
+            <input type="range" id="font-size-slider" min="14" max="42" value="20" class="w-full h-1 bg-slate-700 rounded-lg appearance-none cursor-pointer">
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Center Interactive Canvas Viewport -->
+      <div id="canvas-container" class="canvas-wrapper flex-1 w-full h-full">
+        <!-- Canvas rendered via canvas-editor.js -->
+      </div>
+    </div>
+
+    <!-- Bottom Action & Comment Bar -->
+    <div class="bg-slate-900 border-t border-slate-800 p-4 flex flex-col md:flex-row items-center justify-between gap-4">
+      <div class="flex-1 w-full flex items-center gap-3">
+        <div class="text-xs font-bold text-slate-400 whitespace-nowrap">
+          <span id="canvas-active-page-label" class="text-purple-400 mr-1">[1페이지]</span> 총평 메모:
+        </div>
+        <input type="text" id="canvas-feedback-comment" placeholder="학생에게 전달할 총평 코멘트를 입력하세요 (예: 5번 문제 부호 주의! 다시 계산해보세요.)"
+               class="flex-1 bg-slate-800 border border-slate-700 text-white rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500">
+      </div>
+
+      <div class="flex items-center gap-3 w-full md:w-auto justify-end">
+        <button onclick="closeCanvasEditor()" class="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl transition">
+          취소
+        </button>
+        <button id="btn-save-feedback" class="px-6 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white text-xs font-bold rounded-xl shadow-lg transition flex items-center gap-2">
+          <i data-lucide="check" class="w-4 h-4"></i> 현재 페이지 첨삭 완료 및 저장
+        </button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ======================================================= -->
+  <!-- 4. SUBMISSION DETAIL & FEEDBACK THREAD MODAL (댓글 뷰어) -->
+  <!-- ======================================================= -->
+  <div id="submission-detail-modal" class="hidden fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-3xl max-w-3xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95">
+      
+      <!-- Modal Header -->
+      <div class="px-6 py-4 border-b border-slate-200 flex items-center justify-between bg-slate-50/50">
+        <div>
+          <div class="flex items-center gap-2 mb-1">
+            <span id="modal-sub-student" class="text-xs font-bold px-2 py-0.5 rounded bg-blue-100 text-blue-700"></span>
+            <span id="modal-sub-subject" class="text-xs font-semibold px-2 py-0.5 rounded bg-slate-200 text-slate-700"></span>
+            <span id="modal-sub-date" class="text-xs text-slate-400"></span>
+          </div>
+          <h2 id="modal-sub-title" class="text-lg font-bold text-slate-900"></h2>
+        </div>
+
+        <button onclick="closeDetailModal()" class="p-2 hover:bg-slate-200 rounded-xl text-slate-400 hover:text-slate-700 transition">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Modal Body (Scrollable) -->
+      <div class="flex-1 overflow-y-auto p-6 space-y-6">
+        
+        <!-- Student Memo Box -->
+        <div id="modal-sub-memo-container" class="hidden bg-amber-50 border border-amber-200/70 rounded-2xl p-4">
+          <p class="text-xs font-bold text-amber-800 mb-1">💬 학생 질문 및 메모:</p>
+          <p id="modal-sub-memo" class="text-sm text-slate-700"></p>
+        </div>
+
+        <!-- Submitted Photos Gallery (Multi-Page) -->
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <h4 class="text-xs font-bold text-slate-500 uppercase tracking-wider">제출된 과제 사진 목록 (<span id="modal-photos-count">1</span>장)</h4>
+            <span class="text-xs text-blue-600 font-medium">사진을 클릭하면 크게 볼 수 있습니다</span>
+          </div>
+          <div id="modal-photos-gallery" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+            <!-- Gallery items rendered dynamically -->
+          </div>
+        </div>
+
+        <!-- Teacher Feedback Comments Thread -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between border-t border-slate-200 pt-5">
+            <div class="flex items-center gap-2">
+              <h4 class="text-sm font-bold text-slate-900">선생님 첨삭 피드백 댓글</h4>
+              <span id="modal-feedback-count" class="px-2 py-0.5 text-xs font-bold rounded-full bg-purple-100 text-purple-700">0건</span>
+            </div>
+            <button id="modal-btn-annotate" class="hidden px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-xl transition flex items-center gap-1">
+              <i data-lucide="edit-3" class="w-3.5 h-3.5"></i> 이 과제 캔버스 첨삭하기
+            </button>
+          </div>
+
+          <div id="modal-feedbacks-container" class="space-y-4">
+            <!-- Feedbacks rendered dynamically -->
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="px-6 py-3 border-t border-slate-200 bg-slate-50 flex justify-end">
+        <button onclick="closeDetailModal()" class="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-bold rounded-xl transition">
+          닫기
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ======================================================= -->
+  <!-- 5. SUPABASE SETUP GUIDE MODAL (수파베이스 설정 가이드) -->
+  <!-- ======================================================= -->
+  <div id="supabase-guide-modal" class="hidden fixed inset-0 z-60 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95">
+      <div class="px-6 py-4 bg-emerald-600 text-white flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <i data-lucide="database" class="w-5 h-5"></i>
+          <h3 class="font-bold text-base">Supabase DB & 스토리지 연동 가이드</h3>
+        </div>
+        <button onclick="closeSupabaseGuideModal()" class="text-white/80 hover:text-white">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="p-6 overflow-y-auto space-y-4 text-sm text-slate-700 leading-relaxed">
+        <p class="font-semibold text-slate-900">
+          Supabase 클라우드를 연동하면 전 세계 어디서나 선생님과 학생이 고화질 사진 및 첨삭 데이터를 공유할 수 있습니다!
+        </p>
+
+        <div class="space-y-3">
+          <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <p class="font-bold text-slate-900 mb-1">1단계: Supabase 프로젝트 생성 및 SQL 실행</p>
+            <p class="text-xs text-slate-500 mb-2">1. <a href="https://supabase.com" target="_blank" class="text-blue-600 underline font-semibold">Supabase.com</a>에서 무료 프로젝트를 생성합니다.</p>
+            <p class="text-xs text-slate-500 mb-2">2. 대시보드 좌측 <span class="font-semibold text-slate-800">SQL Editor</span>에 프로젝트 루트의 <code class="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">supabase_schema.sql</code> 파일 내용을 복사하여 실행합니다.</p>
+          </div>
+
+          <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <p class="font-bold text-slate-900 mb-1">2단계: Storage 버킷 생성</p>
+            <p class="text-xs text-slate-500">좌측 <span class="font-semibold text-slate-800">Storage</span> 메뉴에서 <code class="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">tutormark-files</code> 버킷을 생성하고, <span class="font-semibold text-emerald-600">Public bucket</span> 옵션을 켭니다.</p>
+          </div>
+
+          <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
+            <p class="font-bold text-slate-900 mb-1">3단계: .env 파일에 키 입력</p>
+            <p class="text-xs text-slate-500 mb-2">프로젝트 폴더의 <code class="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">.env</code> 파일에 Supabase URL과 Key를 입력합니다:</p>
+            <pre class="bg-slate-900 text-emerald-400 p-3 rounded-lg text-xs font-mono overflow-x-auto">
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=your-anon-or-service-key
+SUPABASE_BUCKET=tutormark-files</pre>
+          </div>
+        </div>
+
+        <p class="text-xs text-slate-500 bg-amber-50 p-3 rounded-xl border border-amber-200 text-amber-800">
+          💡 <strong>참고:</strong> .env에 Supabase 키를 입력하지 않아도 로컬 SQLite와 로컬 저장소로 모든 기능(과제 제출, 캔버스 첨삭, 댓글)이 완벽하게 자동 작동합니다.
+        </p>
+      </div>
+
+      <div class="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
+        <button onclick="closeSupabaseGuideModal()" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow transition">
+          확인
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================= -->
+  <!-- 6. IMAGE LIGHTBOX MODAL (최상위 레이어 고화질 이미지 뷰어) -->
+  <!-- ======================================================= -->
+  <div id="image-lightbox-modal" style="z-index: 99999;" class="hidden fixed inset-0 bg-black/92 backdrop-blur-md flex flex-col items-center justify-between p-4 select-none">
+    <!-- Lightbox Header -->
+    <div class="w-full max-w-6xl flex items-center justify-between text-white py-2 px-2 border-b border-white/10">
+      <div class="flex items-center gap-3">
+        <span class="px-2.5 py-0.5 rounded-full bg-blue-600/80 text-white font-bold text-xs">고화질 원본 뷰어</span>
+        <span id="lightbox-title" class="text-sm font-bold text-slate-200 truncate max-w-md"></span>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <!-- Lightbox Zoom Controls -->
+        <div class="flex items-center bg-white/10 rounded-xl p-1 border border-white/10">
+          <button id="btn-lightbox-zoom-out" class="p-1.5 hover:bg-white/20 rounded-lg text-slate-200 transition" title="축소">
+            <i data-lucide="zoom-out" class="w-4 h-4"></i>
+          </button>
+          <span id="lightbox-zoom-val" class="text-xs font-bold px-2 text-slate-200 min-w-[45px] text-center">100%</span>
+          <button id="btn-lightbox-zoom-in" class="p-1.5 hover:bg-white/20 rounded-lg text-slate-200 transition" title="확대">
+            <i data-lucide="zoom-in" class="w-4 h-4"></i>
+          </button>
+          <button id="btn-lightbox-zoom-reset" class="px-2 py-1 hover:bg-white/20 rounded-lg text-xs font-semibold text-slate-200 transition">
+            맞춤
+          </button>
+        </div>
+
+        <a id="lightbox-download-link" href="#" target="_blank" download="photo.jpg" class="p-2 hover:bg-white/20 rounded-xl text-slate-300 hover:text-white transition" title="원본 다운로드">
+          <i data-lucide="download" class="w-5 h-5"></i>
+        </a>
+
+        <button id="btn-close-lightbox" class="p-2 hover:bg-rose-600/80 rounded-xl text-slate-300 hover:text-white transition" title="닫기 (ESC)">
+          <i data-lucide="x" class="w-6 h-6"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- Lightbox Center Image Viewport -->
+    <div id="lightbox-viewport" class="flex-1 w-full max-w-6xl flex items-center justify-center overflow-hidden relative cursor-grab active:cursor-grabbing my-2">
+      <img id="lightbox-img" src="" class="max-w-full max-h-[80vh] object-contain rounded-lg shadow-2xl transition-transform duration-150 ease-out pointer-events-auto" alt="확대 이미지">
+    </div>
+
+    <!-- Lightbox Footer Tip -->
+    <div class="text-center text-xs text-slate-400 py-1">
+      <span>💡 마우스 휠로 확대/축소하거나 드래그하여 이동할 수 있습니다. (닫기: ESC 키 또는 바깥 클릭)</span>
+    </div>
+  </div>
+
+  <!-- Scripts -->
+  <script src="/static/js/canvas-editor.js"></script>
+  <script src="/static/js/app.js"></script>
+</body>
+</html>

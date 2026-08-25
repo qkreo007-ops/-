@@ -74,6 +74,7 @@ def get_system_status():
         "supabase_enabled": supabase_on,
         "storage_mode": "Supabase Storage & PostgreSQL" if supabase_on else "Local SQLite & Storage",
         "supabase_url": sb.SUPABASE_URL if supabase_on else None,
+        "supabase_key": sb.SUPABASE_KEY if supabase_on else None,
         "supabase_bucket": sb.SUPABASE_BUCKET if supabase_on else None
     }
 

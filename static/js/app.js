@@ -46,6 +46,13 @@ async function checkSystemStatus() {
     const res = await fetch('/api/system/status');
     state.systemStatus = await res.json();
     
+    if (state.systemStatus.supabase_enabled && window.supabase && state.systemStatus.supabase_url && state.systemStatus.supabase_key) {
+      state.supabaseClient = window.supabase.createClient(
+        state.systemStatus.supabase_url,
+        state.systemStatus.supabase_key
+      );
+    }
+    
     const badge = document.getElementById('supabase-status-badge');
     if (badge) {
       if (state.systemStatus.supabase_enabled) {
@@ -181,8 +188,21 @@ function promptTeacherPin() {
 // --- Data Loading ---
 async function loadStudents() {
   try {
-    const res = await fetch('/api/students');
-    state.students = await res.json();
+    let students = [];
+    if (state.supabaseClient) {
+      const { data, error } = await state.supabaseClient.from('students').select('*').order('id', { ascending: true });
+      if (!error && data) students = data;
+    }
+
+    if (students.length === 0) {
+      const res = await fetch('/api/students');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data)) students = data;
+      }
+    }
+
+    state.students = Array.isArray(students) ? students : [];
 
     if (state.students.length > 0 && !state.currentStudent) {
       state.currentStudent = state.students[0];
@@ -270,13 +290,31 @@ function setStatusFilter(status) {
 
 async function loadStats() {
   try {
-    const res = await fetch('/api/stats');
-    const stats = await res.json();
+    let stats = null;
+    if (state.supabaseClient) {
+      const [stRes, subRes, pendRes, revRes] = await Promise.all([
+        state.supabaseClient.from('students').select('id', { count: 'exact', head: true }),
+        state.supabaseClient.from('submissions').select('id', { count: 'exact', head: true }),
+        state.supabaseClient.from('submissions').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
+        state.supabaseClient.from('submissions').select('id', { count: 'exact', head: true }).eq('status', 'reviewed')
+      ]);
+      stats = {
+        student_count: stRes.count || 0,
+        total_submissions: subRes.count || 0,
+        pending_count: pendRes.count || 0,
+        reviewed_count: revRes.count || 0
+      };
+    } else {
+      const res = await fetch('/api/stats');
+      if (res.ok) stats = await res.json();
+    }
 
-    document.getElementById('stat-total-submissions').innerText = stats.total_submissions;
-    document.getElementById('stat-pending-submissions').innerText = stats.pending_count;
-    document.getElementById('stat-reviewed-submissions').innerText = stats.reviewed_count;
-    document.getElementById('stat-student-count').innerText = stats.student_count;
+    if (stats) {
+      document.getElementById('stat-total-submissions').innerText = stats.total_submissions;
+      document.getElementById('stat-pending-submissions').innerText = stats.pending_count;
+      document.getElementById('stat-reviewed-submissions').innerText = stats.reviewed_count;
+      document.getElementById('stat-student-count').innerText = stats.student_count;
+    }
   } catch (err) {
     console.error('Failed to load stats:', err);
   }
@@ -284,19 +322,51 @@ async function loadStats() {
 
 async function loadSubmissions() {
   try {
-    let url = '/api/submissions?';
-    if (state.role === 'student' && state.currentStudent) {
-      url += `student_id=${state.currentStudent.id}&`;
-    } else if (state.role === 'teacher' && state.studentFilter !== 'all') {
-      url += `student_id=${state.studentFilter}&`;
+    let submissions = [];
+    if (state.supabaseClient) {
+      let query = state.supabaseClient.from('submissions').select('*, feedbacks(id)').order('id', { ascending: false });
+      if (state.role === 'student' && state.currentStudent) {
+        query = query.eq('student_id', state.currentStudent.id);
+      } else if (state.role === 'teacher' && state.studentFilter !== 'all') {
+        query = query.eq('student_id', state.studentFilter);
+      }
+      if (state.statusFilter !== 'all') {
+        query = query.eq('status', state.statusFilter);
+      }
+
+      const { data, error } = await query;
+      if (!error && data) {
+        submissions = data.map(sub => {
+          let images = [];
+          if (sub.image_urls) {
+            images = typeof sub.image_urls === 'string' ? JSON.parse(sub.image_urls) : sub.image_urls;
+          } else if (sub.image_url) {
+            images = [sub.image_url];
+          }
+          return {
+            ...sub,
+            images,
+            feedback_count: Array.isArray(sub.feedbacks) ? sub.feedbacks.length : 0
+          };
+        });
+      }
     }
 
-    if (state.statusFilter !== 'all') {
-      url += `status=${state.statusFilter}&`;
+    if (submissions.length === 0) {
+      let url = '/api/submissions?';
+      if (state.role === 'student' && state.currentStudent) {
+        url += `student_id=${state.currentStudent.id}&`;
+      } else if (state.role === 'teacher' && state.studentFilter !== 'all') {
+        url += `student_id=${state.studentFilter}&`;
+      }
+      if (state.statusFilter !== 'all') {
+        url += `status=${state.statusFilter}&`;
+      }
+      const res = await fetch(url);
+      if (res.ok) submissions = await res.json();
     }
 
-    const res = await fetch(url);
-    state.submissions = await res.json();
+    state.submissions = Array.isArray(submissions) ? submissions : [];
 
     if (state.role === 'student') {
       renderStudentSubmissions();
@@ -1080,28 +1150,62 @@ function closeLightbox() {
 }
 
 // --- Quick Add Student Modal ---
-function promptAddStudent() {
+async function promptAddStudent() {
   const name = prompt('추가할 학생의 이름을 입력하세요 (예: 박지훈):');
   if (!name || !name.trim()) return;
 
   const grade = prompt('학생의 학년 또는 과목을 입력하세요 (예: 중2 수학):', '중등부') || '';
+  const newStudent = {
+    name: name.trim(),
+    grade: grade.trim(),
+    pin: '0000',
+    avatar_color: ['#EC4899', '#8B5CF6', '#F59E0B', '#10B981', '#3B82F6'][Math.floor(Math.random() * 5)]
+  };
 
-  fetch('/api/students', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      name: name.trim(),
-      grade: grade.trim(),
-      pin: '0000',
-      avatar_color: ['#EC4899', '#8B5CF6', '#F59E0B', '#10B981', '#3B82F6'][Math.floor(Math.random() * 5)]
-    })
-  })
-  .then(res => res.json())
-  .then(data => {
-    showToast('새 학생이 추가되었습니다.', 'success');
-    loadStudents();
-  })
-  .catch(err => showToast('학생 추가 실패', 'error'));
+  try {
+    // 1. If Supabase Client is initialized on frontend, insert directly
+    if (state.supabaseClient) {
+      const { data, error } = await state.supabaseClient.from('students').insert([newStudent]).select();
+      if (error) throw new Error(error.message);
+      showToast(`'${name}' 학생이 등록되었습니다.`, 'success');
+      await loadStudents();
+      await loadStats();
+      if (data && data[0]) {
+        state.currentStudent = data[0];
+        renderStudentSelectUI();
+        loadSubmissions();
+      }
+      return;
+    }
+
+    // 2. Otherwise fallback to API endpoint
+    const res = await fetch('/api/students', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newStudent)
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.detail || errData.error || '학생 추가 실패');
+    }
+
+    const created = await res.json();
+    showToast(`'${name}' 학생이 등록되었습니다.`, 'success');
+    await loadStudents();
+    await loadStats();
+    if (created && created.id) {
+      const found = state.students.find(s => s.id === created.id);
+      if (found) {
+        state.currentStudent = found;
+        renderStudentSelectUI();
+        loadSubmissions();
+      }
+    }
+  } catch (err) {
+    console.error('Failed to add student:', err);
+    showToast('학생 추가 실패: ' + err.message, 'error');
+  }
 }
 
 // --- Supabase Setup Guide Modal ---

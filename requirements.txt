@@ -2,6 +2,7 @@ fastapi>=0.110.0
 uvicorn>=0.28.0
 python-multipart>=0.0.9
 pillow>=10.0.0
+pillow-heif>=0.15.0  # iPhone HEIC/HEIF decoding (optional: app runs without it)
 supabase>=2.0.0
 python-dotenv>=1.0.0
 httpx>=0.26.0

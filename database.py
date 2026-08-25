@@ -165,19 +165,46 @@ def get_submissions(student_id: int = None, status: str = None):
         params.append(status)
         
     query += " ORDER BY id DESC"
-    cursor.execute(query, params)
+
+    # Pull the feedback tally in the same statement rather than issuing one COUNT per row
+    joined = f"""
+        SELECT s.*, (SELECT COUNT(*) FROM feedbacks f WHERE f.submission_id = s.id) AS feedback_count
+        FROM ({query}) AS s
+    """
+    cursor.execute(joined, params)
     rows = cursor.fetchall()
-    
+
     submissions = []
     for r in rows:
         sub_dict = dict(r)
         sub_dict["images"] = parse_image_urls(sub_dict)
-        cursor.execute("SELECT COUNT(*) FROM feedbacks WHERE submission_id = ?", (sub_dict["id"],))
-        sub_dict["feedback_count"] = cursor.fetchone()[0]
         submissions.append(sub_dict)
-        
+
     conn.close()
     return submissions
+
+
+def get_stats():
+    """Dashboard counters in one connection, using COUNT instead of loading every row."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM students")
+        student_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM submissions")
+        total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM submissions WHERE status = 'pending'")
+        pending = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM submissions WHERE status = 'reviewed'")
+        reviewed = cursor.fetchone()[0]
+        return {
+            "student_count": student_count,
+            "total_submissions": total,
+            "pending_count": pending,
+            "reviewed_count": reviewed
+        }
+    finally:
+        conn.close()
 
 def get_submission_detail(submission_id: int):
     conn = get_db_connection()
@@ -209,15 +236,15 @@ def delete_submission(submission_id: int):
         images_to_delete = parse_image_urls(dict(sub))
     
     cursor.execute("SELECT annotated_image_filename FROM feedbacks WHERE submission_id = ?", (submission_id,))
-    feedbacks = cursor.fetchall()
-    
+    feedback_images = [f["annotated_image_filename"] for f in cursor.fetchall()]
+
     cursor.execute("DELETE FROM submissions WHERE id = ?", (submission_id,))
     conn.commit()
     conn.close()
-    
+
     return {
         "original_images": images_to_delete,
-        "feedback_images": [f["annotated_image_filename"] for f in feedbacks] if feedbacks else []
+        "feedback_images": feedback_images
     }
 
 def create_feedback(submission_id: int, teacher_name: str, comment: str, annotated_image_filename: str, annotation_data: str = "{}", page_index: int = 0):

@@ -1,9 +1,10 @@
 /* Custom Styles for TutorMark */
 
-@import url('https://fonts.googleapis.com/css2?family=Pretendard:wght@300;400;500;600;700;800&display=swap');
+@import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css');
 
 :root {
-  --font-sans: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, Roboto, sans-serif;
+  --font-sans: 'Pretendard Variable', 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui,
+    'Malgun Gothic', 'Apple SD Gothic Neo', Roboto, sans-serif;
 }
 
 body {
@@ -91,19 +92,30 @@ body {
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.35);
 }
 
-/* Color picker swatch */
-.color-swatch {
+/* Color picker swatch (markup uses .canvas-color-swatch) */
+.color-swatch,
+.canvas-color-swatch {
   transition: transform 0.15s ease, box-shadow 0.15s ease;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
 }
 
-.color-swatch:hover {
+.color-swatch:hover,
+.canvas-color-swatch:hover {
   transform: scale(1.15);
 }
 
-.color-swatch.active {
+.color-swatch.active,
+.canvas-color-swatch.active {
   transform: scale(1.2);
-  outline: 2px solid white;
-  box-shadow: 0 0 0 4px #3b82f6;
+  outline: 2px solid #ffffff;
+  box-shadow: 0 0 0 3px #3b82f6;
+}
+
+/* The tool palette sits over the canvas: never let it swallow a drawing stroke */
+.canvas-wrapper canvas {
+  touch-action: none;
 }
 
 /* Image zoom & modal transitions */
@@ -130,6 +142,16 @@ body {
   box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);
   outline: none;
   z-index: 50;
+  white-space: pre-wrap;
+  cursor: text;
+}
+
+/* contentEditable has no native placeholder support */
+.canvas-text-overlay:empty::before {
+  content: attr(data-placeholder);
+  color: #94a3b8;
+  font-weight: 500;
+  pointer-events: none;
 }
 
 /* Mobile camera upload button pulse */

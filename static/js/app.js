@@ -16,6 +16,10 @@ const state = {
   activeAnnotatingSubmission: null,
   activePageIndex: 0,
   pageAnnotations: {}, // Cache of annotations per page: { 0: [...objects], 1: [...objects] }
+  pageComments: {},    // Cache of the 총평 comment per page
+  savedSignatures: {}, // Snapshot of each page's annotations as last persisted
+  previewObjectUrls: [], // Blob URLs for the upload preview strip (revoked on re-render)
+  supabaseClient: null,
   systemStatus: null
 };
 
@@ -31,6 +35,7 @@ function resolveImageUrl(pathOrUrl) {
 // --- Initialization ---
 document.addEventListener('DOMContentLoaded', async () => {
   initUI();
+  showLoadingPlaceholders();
   await checkSystemStatus();
   await loadStudents();
   await loadSubmissions();
@@ -41,46 +46,63 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 });
 
+/**
+ * Decides how the page talks to its data, in priority order:
+ *   1. An explicit key the user saved in this browser (localStorage) always wins.
+ *   2. Whatever the backend reports. If a server is reachable and says it is in
+ *      local SQLite mode, that is authoritative - we must NOT quietly connect to
+ *      the project baked into config.js, which would show the wrong data.
+ *   3. config.js defaults, used only for static hosting with no backend at all.
+ */
 async function checkSystemStatus() {
   let supabaseUrl = '';
   let supabaseKey = '';
   let supabaseBucket = 'tutormark-files';
   let supabaseEnabled = false;
+  let serverAnswered = false;
 
-  // 1. Try server API / Cloudflare Function first
-  try {
-    const res = await fetch('/api/system/status');
-    if (res.ok) {
-      const data = await res.json();
-      if (data.supabase_enabled && data.supabase_url && data.supabase_key) {
-        supabaseUrl = data.supabase_url;
-        supabaseKey = data.supabase_key;
-        supabaseBucket = data.supabase_bucket || 'tutormark-files';
+  // 1. Manual override saved from the connection modal
+  const saved = localStorage.getItem('TUTORMARK_SUPABASE_CONFIG');
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      if (parsed.url && parsed.key) {
+        supabaseUrl = parsed.url;
+        supabaseKey = parsed.key;
+        supabaseBucket = parsed.bucket || 'tutormark-files';
         supabaseEnabled = true;
       }
+    } catch (e) {
+      console.warn('Stored Supabase config is unreadable, ignoring it.');
     }
-  } catch (err) {
-    console.log('Server status API not reachable, checking client config...');
   }
 
-  // 2. Check localStorage
+  // 2. Server / Cloudflare Function
   if (!supabaseEnabled) {
-    const saved = localStorage.getItem('TUTORMARK_SUPABASE_CONFIG');
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.url && parsed.key) {
-          supabaseUrl = parsed.url;
-          supabaseKey = parsed.key;
-          supabaseBucket = parsed.bucket || 'tutormark-files';
+    try {
+      const res = await fetch('/api/system/status');
+      if (res.ok) {
+        const data = await res.json();
+        serverAnswered = true;
+        state.serverStatus = data;
+        if (data.supabase_enabled && data.supabase_url && data.supabase_key) {
+          supabaseUrl = data.supabase_url;
+          supabaseKey = data.supabase_key;
+          supabaseBucket = data.supabase_bucket || 'tutormark-files';
           supabaseEnabled = true;
+        } else if (data.supabase_enabled && data.client_direct_access === false) {
+          // Server has Supabase but withheld a non-anon key: go through its API instead
+          console.info('Server keeps its Supabase key private; using the server API.');
         }
-      } catch (e) {}
+      }
+    } catch (err) {
+      console.log('Server status API not reachable, checking client config...');
     }
   }
 
-  // 3. Fallback to Project Default Config (from config.js)
-  if (!supabaseEnabled && window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
+  // 3. Static-hosting default, only when no backend answered
+  if (!supabaseEnabled && !serverAnswered &&
+      window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
     supabaseUrl = window.SUPABASE_CONFIG.url;
     supabaseKey = window.SUPABASE_CONFIG.anonKey;
     supabaseBucket = window.SUPABASE_CONFIG.bucket || 'tutormark-files';
@@ -88,6 +110,9 @@ async function checkSystemStatus() {
   }
 
   // 4. Initialize Supabase Client
+  state.supabaseClient = null;
+  state.systemStatus = null;
+
   if (supabaseEnabled && window.supabase && supabaseUrl && supabaseKey) {
     try {
       state.supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
@@ -102,21 +127,47 @@ async function checkSystemStatus() {
     }
   }
 
-  // Update Status Badge UI
+  renderConnectionBadge();
+}
+
+function renderConnectionBadge() {
   const badge = document.getElementById('supabase-status-badge');
-  if (badge) {
-    if (state.systemStatus && state.systemStatus.supabase_enabled) {
-      badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ⚡ Supabase DB & Storage 연동됨`;
-      badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-900/80 text-emerald-300 border border-emerald-700 flex items-center gap-1.5 cursor-pointer hover:bg-emerald-800 transition';
-      badge.title = `Supabase URL: ${state.systemStatus.supabase_url}\nBucket: ${state.systemStatus.supabase_bucket}\n클릭하여 설정을 변경할 수 있습니다.`;
-      badge.onclick = () => openSupabaseGuideModal();
-    } else {
-      badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> 💾 로컬 모드 (SQLite)`;
-      badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-900/60 text-amber-300 border border-amber-700 flex items-center gap-1.5 cursor-pointer hover:bg-amber-800 transition';
-      badge.title = '클릭하여 Supabase 연동 키를 입력하고 활성화하세요.';
-      badge.onclick = () => openSupabaseGuideModal();
-    }
+  if (!badge) return;
+
+  if (state.systemStatus && state.systemStatus.supabase_enabled) {
+    badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ⚡ Supabase DB & Storage 연동됨`;
+    badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-900/80 text-emerald-300 border border-emerald-700 flex items-center gap-1.5 cursor-pointer hover:bg-emerald-800 transition';
+    badge.title = `Supabase URL: ${state.systemStatus.supabase_url}
+Bucket: ${state.systemStatus.supabase_bucket}
+클릭하여 설정을 변경할 수 있습니다.`;
+  } else {
+    badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> 💾 로컬 모드 (SQLite)`;
+    badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-900/60 text-amber-300 border border-amber-700 flex items-center gap-1.5 cursor-pointer hover:bg-amber-800 transition';
+    badge.title = '클릭하여 Supabase 연동 키를 입력하고 활성화하세요.';
   }
+  badge.onclick = () => openSupabaseGuideModal();
+}
+
+/** A cold Supabase connection can take several seconds - don't leave the page blank. */
+function showLoadingPlaceholders() {
+  const chips = document.getElementById('student-chips-container');
+  if (chips && !chips.innerHTML.trim()) {
+    chips.innerHTML = `
+      <span class="px-3.5 py-2 rounded-xl text-sm text-slate-400 bg-slate-100 border border-slate-200 animate-pulse">
+        학생 목록 불러오는 중...
+      </span>`;
+  }
+
+  ['student-submissions-list', 'teacher-submissions-list'].forEach(id => {
+    const list = document.getElementById(id);
+    if (list && !list.innerHTML.trim()) {
+      list.innerHTML = `
+        <div class="py-12 text-center text-slate-400 bg-white rounded-2xl border border-dashed border-slate-200">
+          <div class="inline-block w-6 h-6 border-2 border-slate-300 border-t-blue-500 rounded-full animate-spin mb-2"></div>
+          <p class="text-sm font-medium">과제 목록을 불러오는 중입니다...</p>
+        </div>`;
+    }
+  });
 }
 
 function initUI() {
@@ -161,6 +212,73 @@ function initUI() {
 
   // Initialize High-Z-Index Lightbox Viewer
   lightbox.init();
+
+  // Any element carrying data-lightbox-src opens the viewer (replaces inline onclick strings,
+  // which broke on titles containing quotes and allowed markup to leak into the handler)
+  document.addEventListener('click', (e) => {
+    const dl = e.target.closest('[data-download-src]');
+    if (dl) {
+      e.preventDefault();
+      e.stopPropagation();
+      downloadImage(dl.dataset.downloadSrc, dl.dataset.downloadName);
+      return;
+    }
+
+    const trigger = e.target.closest('[data-lightbox-src]');
+    if (!trigger) return;
+    openLightbox(trigger.dataset.lightboxSrc, trigger.dataset.lightboxTitle || '이미지 확대보기');
+  });
+
+  // Escape closes the topmost open modal
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!document.getElementById('image-lightbox-modal').classList.contains('hidden')) return; // lightbox handles itself
+    if (!document.getElementById('supabase-guide-modal').classList.contains('hidden')) {
+      closeSupabaseGuideModal();
+    } else if (!document.getElementById('canvas-editor-modal').classList.contains('hidden')) {
+      closeCanvasEditor();
+    } else if (!document.getElementById('submission-detail-modal').classList.contains('hidden')) {
+      closeDetailModal();
+    }
+  });
+
+  // Warn before a reload discards an unsaved annotation
+  window.addEventListener('beforeunload', (e) => {
+    if (hasUnsavedAnnotations()) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+
+  // Keep the canvas backing store in sync with the viewport
+  window.addEventListener('resize', () => {
+    if (!document.getElementById('canvas-editor-modal').classList.contains('hidden')) {
+      state.canvasEditor.resizeCanvas();
+    }
+  });
+}
+
+function annotationSignature(objs) {
+  return JSON.stringify(objs || []);
+}
+
+function markPageSaved(pageIndex, objs) {
+  state.savedSignatures[pageIndex] = annotationSignature(objs);
+}
+
+/** A page counts as unsaved only when its strokes differ from what was last persisted. */
+function hasUnsavedAnnotations() {
+  if (!state.activeAnnotatingSubmission || !state.canvasEditor) return false;
+
+  const savedFor = (i) => state.savedSignatures[i] !== undefined ? state.savedSignatures[i] : '[]';
+
+  if (annotationSignature(state.canvasEditor.exportVectorData()) !== savedFor(state.activePageIndex)) {
+    return true;
+  }
+  return Object.keys(state.pageAnnotations).some(key => {
+    const i = Number(key);
+    return i !== state.activePageIndex && annotationSignature(state.pageAnnotations[key]) !== savedFor(i);
+  });
 }
 
 function getActiveSubmissionImages() {
@@ -208,6 +326,9 @@ function switchRole(role) {
   if (window.lucide) lucide.createIcons();
 }
 
+// Used only when the verify-pin endpoint is unreachable (e.g. static Cloudflare Pages hosting)
+const LOCAL_TEACHER_PINS = ['1234', '0000', 'admin'];
+
 function promptTeacherPin() {
   if (state.role === 'teacher') return;
   
@@ -229,7 +350,13 @@ function promptTeacherPin() {
     }
   })
   .catch(() => {
-    switchRole('teacher');
+    // No backend (static hosting): fall back to a local check instead of granting access outright
+    if (LOCAL_TEACHER_PINS.includes(pin.trim())) {
+      switchRole('teacher');
+      showToast('선생님 모드로 전환되었습니다.', 'success');
+    } else {
+      showToast('비밀번호가 올바르지 않습니다. (기본: 1234)', 'error');
+    }
   });
 }
 
@@ -237,12 +364,21 @@ function promptTeacherPin() {
 async function loadStudents() {
   try {
     let students = [];
+    let loadedFromSupabase = false;
+
     if (state.supabaseClient) {
       const { data, error } = await state.supabaseClient.from('students').select('*').order('id', { ascending: true });
-      if (!error && data) students = data;
+      if (error) {
+        console.warn('Supabase students query failed, falling back to the local API:', error.message);
+      } else {
+        students = data || [];
+        loadedFromSupabase = true;
+      }
     }
 
-    if (students.length === 0) {
+    // Only reach for the local API when Supabase is absent or actually errored.
+    // An empty Supabase table is a real answer and must not be overwritten by local data.
+    if (!loadedFromSupabase) {
       const res = await fetch('/api/students');
       if (res.ok) {
         const data = await res.json();
@@ -252,7 +388,12 @@ async function loadStudents() {
 
     state.students = Array.isArray(students) ? students : [];
 
-    if (state.students.length > 0 && !state.currentStudent) {
+    // Re-bind the selection to the refreshed row (or the first student) so stale objects are not kept
+    if (state.currentStudent) {
+      const stillThere = state.students.find(s => s.id === state.currentStudent.id);
+      state.currentStudent = stillThere || null;
+    }
+    if (!state.currentStudent && state.students.length > 0) {
       state.currentStudent = state.students[0];
     }
 
@@ -266,6 +407,14 @@ async function loadStudents() {
 function renderStudentSelectUI() {
   const container = document.getElementById('student-chips-container');
   if (!container) return;
+
+  if (state.students.length === 0) {
+    container.innerHTML = `
+      <span class="px-3.5 py-2 rounded-xl text-sm text-slate-400 bg-slate-50 border border-dashed border-slate-200">
+        등록된 학생이 없습니다. [학생 추가]를 눌러주세요.
+      </span>`;
+    return;
+  }
 
   container.innerHTML = state.students.map(s => `
     <button type="button" 
@@ -371,6 +520,8 @@ async function loadStats() {
 async function loadSubmissions() {
   try {
     let submissions = [];
+    let loadedFromSupabase = false;
+
     if (state.supabaseClient) {
       let query = state.supabaseClient.from('submissions').select('*, feedbacks(id)').order('id', { ascending: false });
       if (state.role === 'student' && state.currentStudent) {
@@ -383,8 +534,11 @@ async function loadSubmissions() {
       }
 
       const { data, error } = await query;
-      if (!error && data) {
-        submissions = data.map(sub => {
+      if (error) {
+        console.warn('Supabase submissions query failed, falling back to the local API:', error.message);
+      } else {
+        loadedFromSupabase = true;
+        submissions = (data || []).map(sub => {
           let images = [];
           if (sub.image_urls) {
             images = typeof sub.image_urls === 'string' ? JSON.parse(sub.image_urls) : sub.image_urls;
@@ -400,17 +554,17 @@ async function loadSubmissions() {
       }
     }
 
-    if (submissions.length === 0) {
-      let url = '/api/submissions?';
+    if (!loadedFromSupabase) {
+      const params = new URLSearchParams();
       if (state.role === 'student' && state.currentStudent) {
-        url += `student_id=${state.currentStudent.id}&`;
+        params.set('student_id', state.currentStudent.id);
       } else if (state.role === 'teacher' && state.studentFilter !== 'all') {
-        url += `student_id=${state.studentFilter}&`;
+        params.set('student_id', state.studentFilter);
       }
       if (state.statusFilter !== 'all') {
-        url += `status=${state.statusFilter}&`;
+        params.set('status', state.statusFilter);
       }
-      const res = await fetch(url);
+      const res = await fetch(`/api/submissions?${params.toString()}`);
       if (res.ok) submissions = await res.json();
     }
 
@@ -453,7 +607,7 @@ function renderStudentSubmissions() {
       <div class="p-5 flex flex-col md:flex-row gap-5 items-start">
         <div class="w-full md:w-44 h-44 bg-slate-900 rounded-xl overflow-hidden relative cursor-pointer group flex-shrink-0"
              onclick="openDetailModal(${sub.id})">
-          <img src="${firstImgSrc}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="과제 사진">
+          <img src="${escapeHtml(firstImgSrc)}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="과제 사진">
           ${count > 1 ? `
             <div class="absolute top-2 right-2 px-2 py-0.5 rounded-lg bg-black/75 text-white font-bold text-xs flex items-center gap-1 backdrop-blur-xs">
               <i data-lucide="images" class="w-3 h-3"></i> ${count}장
@@ -522,7 +676,7 @@ function renderTeacherSubmissions() {
       <div class="p-5 flex flex-col md:flex-row gap-5 items-start">
         <div class="w-full md:w-48 h-48 bg-slate-900 rounded-xl overflow-hidden relative group cursor-pointer flex-shrink-0"
              onclick="openCanvasEditor(${sub.id}, 0)">
-          <img src="${firstImgSrc}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="과제 사진">
+          <img src="${escapeHtml(firstImgSrc)}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="과제 사진">
           ${count > 1 ? `
             <div class="absolute top-2 right-2 px-2.5 py-0.5 rounded-lg bg-black/80 text-white font-bold text-xs flex items-center gap-1 backdrop-blur-xs">
               <i data-lucide="images" class="w-3 h-3 text-purple-300"></i> 총 ${count}장
@@ -588,14 +742,23 @@ function handlePhotoSelect(e) {
   e.target.value = '';
 }
 
+function releasePreviewObjectUrls() {
+  state.previewObjectUrls.forEach(url => URL.revokeObjectURL(url));
+  state.previewObjectUrls = [];
+}
+
 function renderPhotoThumbnails() {
   const container = document.getElementById('photo-preview-container');
   const grid = document.getElementById('photo-thumbnails-grid');
   const badge = document.getElementById('student-photo-count-badge');
 
+  // Every render mints fresh blob URLs, so free the previous batch or they leak for the session
+  releasePreviewObjectUrls();
+
   if (state.selectedPhotoFiles.length === 0) {
     container.classList.add('hidden');
     badge.classList.add('hidden');
+    grid.innerHTML = '';
     return;
   }
 
@@ -605,10 +768,11 @@ function renderPhotoThumbnails() {
 
   grid.innerHTML = state.selectedPhotoFiles.map((file, idx) => {
     const objectUrl = URL.createObjectURL(file);
+    state.previewObjectUrls.push(objectUrl);
     return `
       <div class="relative group aspect-square rounded-xl overflow-hidden bg-slate-800 border-2 border-slate-700 shadow-sm cursor-pointer"
-           onclick="openLightbox('${objectUrl}', '선택한 사진 미리보기 (${idx + 1}페이지)')">
-        <img src="${objectUrl}" class="w-full h-full object-cover group-hover:scale-105 transition duration-200" alt="사진 ${idx + 1}">
+           data-lightbox-src="${escapeHtml(objectUrl)}" data-lightbox-title="선택한 사진 미리보기 (${idx + 1}페이지)">
+        <img src="${escapeHtml(objectUrl)}" class="w-full h-full object-cover group-hover:scale-105 transition duration-200" alt="사진 ${idx + 1}">
         <span class="absolute bottom-1.5 left-1.5 px-1.5 py-0.5 rounded bg-black/80 text-white font-bold text-[10px] backdrop-blur-xs">
           ${idx + 1}페이지
         </span>
@@ -826,8 +990,8 @@ async function openDetailModal(submissionId) {
       const fullUrl = resolveImageUrl(imgUrl);
       return `
         <div class="relative group rounded-2xl overflow-hidden bg-slate-950 border border-slate-200 cursor-pointer aspect-[3/4] shadow-xs"
-             onclick="openLightbox('${fullUrl}', '${escapeHtml(sub.title)} - ${idx + 1}페이지')">
-          <img src="${fullUrl}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="과제 ${idx + 1}페이지">
+             data-lightbox-src="${escapeHtml(fullUrl)}" data-lightbox-title="${escapeHtml(sub.title)} - ${idx + 1}페이지">
+          <img src="${escapeHtml(fullUrl)}" class="w-full h-full object-cover group-hover:scale-105 transition duration-300" alt="과제 ${idx + 1}페이지">
           <span class="absolute top-2 left-2 px-2 py-0.5 rounded-lg bg-black/80 text-white font-bold text-xs backdrop-blur-xs">
             ${idx + 1}페이지
           </span>
@@ -901,15 +1065,16 @@ function renderFeedbacksList(feedbacks) {
       ` : ''}
 
       <div class="relative group rounded-xl overflow-hidden bg-slate-950 border border-purple-200 max-h-96 cursor-pointer"
-           onclick="openLightbox('${fbImgUrl}', '선생님 첨삭본 (${pageNum}페이지, ${idx + 1}차)')">
-        <img src="${fbImgUrl}" class="w-full h-auto object-contain mx-auto max-h-96" alt="첨삭 이미지">
+           data-lightbox-src="${escapeHtml(fbImgUrl)}" data-lightbox-title="선생님 첨삭본 (${pageNum}페이지, ${idx + 1}차)">
+        <img src="${escapeHtml(fbImgUrl)}" class="w-full h-auto object-contain mx-auto max-h-96" alt="첨삭 이미지">
         <div class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white text-xs font-semibold gap-1.5">
           <i data-lucide="zoom-in" class="w-4 h-4"></i> 클릭하여 첨삭본 크게 확대보기
         </div>
       </div>
 
       <div class="flex items-center justify-end gap-2 mt-2.5">
-        <a href="${fbImgUrl}" target="_blank" download="첨삭피드백_${pageNum}페이지_${idx+1}.jpg" 
+        <a href="${escapeHtml(fbImgUrl)}" target="_blank" rel="noopener"
+           data-download-src="${escapeHtml(fbImgUrl)}" data-download-name="첨삭피드백_${pageNum}페이지_${idx + 1}.jpg" 
            class="text-xs text-purple-600 hover:text-purple-800 font-medium flex items-center gap-1 px-2.5 py-1 rounded hover:bg-purple-100/50 transition">
           <i data-lucide="download" class="w-3.5 h-3.5"></i> 첨삭본 다운로드
         </a>
@@ -934,7 +1099,11 @@ async function openCanvasEditor(submissionId, pageIndex = 0) {
     const sub = await fetchSubmissionDetail(submissionId);
     state.activeAnnotatingSubmission = sub;
     state.activePageIndex = pageIndex;
-    state.pageAnnotations = {}; // Clear cached annotations for new session
+    state.pageComments = {};
+
+    // Reopening a reviewed submission restores the strokes from the most recent
+    // feedback of each page, so the teacher can amend rather than redraw.
+    state.pageAnnotations = collectSavedAnnotations(sub);
 
     document.getElementById('canvas-student-info').innerText = `${sub.student_name} (${sub.subject})`;
     document.getElementById('canvas-submission-title').innerText = sub.title;
@@ -947,19 +1116,42 @@ async function openCanvasEditor(submissionId, pageIndex = 0) {
 
     state.canvasEditor.resizeCanvas();
     const images = getActiveSubmissionImages();
-    const targetImageUrl = resolveImageUrl(images[state.activePageIndex] || images[0]);
-    await state.canvasEditor.loadImage(targetImageUrl);
-
-    // Apply cached annotations if any
-    if (state.pageAnnotations[state.activePageIndex]) {
-      state.canvasEditor.importVectorData(state.pageAnnotations[state.activePageIndex]);
+    if (images.length === 0) {
+      throw new Error('이 과제에는 첨삭할 사진이 없습니다.');
     }
 
+    const targetImageUrl = resolveImageUrl(images[state.activePageIndex] || images[0]);
+    // Pass the saved strokes into loadImage so they survive its internal reset
+    await state.canvasEditor.loadImage(targetImageUrl, state.pageAnnotations[state.activePageIndex] || null);
+
     if (window.lucide) lucide.createIcons();
-    showToast(`첨삭 에디터가 준비되었습니다. (현재 ${state.activePageIndex + 1}페이지)`, 'info');
+
+    Object.keys(state.pageAnnotations).forEach(i => markPageSaved(i, state.pageAnnotations[i]));
+    markPageSaved(state.activePageIndex, state.canvasEditor.exportVectorData());
+
+    const restored = (state.pageAnnotations[state.activePageIndex] || []).length;
+    showToast(
+      restored > 0
+        ? `첨삭 에디터가 준비되었습니다. (${state.activePageIndex + 1}페이지 · 기존 첨삭 ${restored}개 불러옴)`
+        : `첨삭 에디터가 준비되었습니다. (현재 ${state.activePageIndex + 1}페이지)`,
+      'info'
+    );
   } catch (err) {
+    document.getElementById('canvas-editor-modal').classList.add('hidden');
+    state.activeAnnotatingSubmission = null;
     showToast('캔버스 열기 실패: ' + err.message, 'error');
   }
+}
+
+/** Latest feedback per page wins, so amending twice keeps building on the newest version. */
+function collectSavedAnnotations(sub) {
+  const byPage = {};
+  (sub.feedbacks || []).forEach(fb => {
+    const page = Number(fb.page_index) || 0;
+    const objs = state.canvasEditor.parseVectorData(fb.annotation_data);
+    if (objs.length > 0) byPage[page] = objs;
+  });
+  return byPage;
 }
 
 function switchCanvasPage(newPageIndex) {
@@ -967,20 +1159,20 @@ function switchCanvasPage(newPageIndex) {
   const images = getActiveSubmissionImages();
   if (newPageIndex < 0 || newPageIndex >= images.length) return;
 
-  // Cache current page annotations
+  const commentInput = document.getElementById('canvas-feedback-comment');
+
+  // Stash this page's work before swapping the background image out from under it
   state.pageAnnotations[state.activePageIndex] = state.canvasEditor.exportVectorData();
+  state.pageComments[state.activePageIndex] = commentInput.value;
 
   state.activePageIndex = newPageIndex;
   updateCanvasPageUI();
+  commentInput.value = state.pageComments[newPageIndex] || '';
 
-  const targetImageUrl = resolveImageUrl(images[state.activePageIndex]);
-  state.canvasEditor.loadImage(targetImageUrl).then(() => {
-    if (state.pageAnnotations[state.activePageIndex]) {
-      state.canvasEditor.importVectorData(state.pageAnnotations[state.activePageIndex]);
-    } else {
-      state.canvasEditor.clearDrawingsOnly();
-    }
-  });
+  const targetImageUrl = resolveImageUrl(images[newPageIndex]);
+  state.canvasEditor
+    .loadImage(targetImageUrl, state.pageAnnotations[newPageIndex] || null)
+    .catch(err => showToast(`${newPageIndex + 1}페이지 이미지를 불러오지 못했습니다: ${err.message}`, 'error'));
 }
 
 function updateCanvasPageUI() {
@@ -1011,10 +1203,17 @@ function updateCanvasPageUI() {
   }
 }
 
-function closeCanvasEditor() {
+function closeCanvasEditor(force = false) {
+  if (force !== true && hasUnsavedAnnotations()) {
+    if (!confirm('저장하지 않은 첨삭 내용이 있습니다. 정말 닫으시겠습니까?')) return;
+  }
+
   document.getElementById('canvas-editor-modal').classList.add('hidden');
   state.activeAnnotatingSubmission = null;
   state.pageAnnotations = {};
+  state.pageComments = {};
+  state.savedSignatures = {};
+  state.activePageIndex = 0;
 }
 
 // Setup Canvas Toolbar
@@ -1044,6 +1243,7 @@ function setupCanvasToolbar() {
   const customColorInput = document.getElementById('canvas-custom-color');
   if (customColorInput) {
     customColorInput.addEventListener('input', (e) => {
+      colorSwatches.forEach(sw => sw.classList.remove('active'));
       editor.setColor(e.target.value);
     });
   }
@@ -1119,7 +1319,7 @@ async function handleSaveFeedback() {
           teacher_name: '선생님',
           comment: comment,
           annotated_image_url: publicUrl,
-          annotation_data: JSON.stringify(exported.vectorData),
+          annotation_data: exported.vectorData, // already a JSON string
           created_at: new Date().toISOString()
         }])
         .select();
@@ -1131,11 +1331,7 @@ async function handleSaveFeedback() {
         .update({ status: 'reviewed' })
         .eq('id', state.activeAnnotatingSubmission.id);
 
-      showToast(`${state.activePageIndex + 1}페이지 첨삭 피드백이 성공적으로 댓글로 등록되었습니다!`, 'success');
-      closeCanvasEditor();
-
-      await loadSubmissions();
-      await loadStats();
+      await finishFeedbackSave(exported);
       return;
     }
 
@@ -1158,11 +1354,7 @@ async function handleSaveFeedback() {
       throw new Error(err.detail || '피드백 저장 실패');
     }
 
-    showToast(`${state.activePageIndex + 1}페이지 첨삭 피드백이 성공적으로 댓글로 등록되었습니다!`, 'success');
-    closeCanvasEditor();
-
-    await loadSubmissions();
-    await loadStats();
+    await finishFeedbackSave(exported);
   } catch (err) {
     showToast(err.message, 'error');
   } finally {
@@ -1172,13 +1364,79 @@ async function handleSaveFeedback() {
   }
 }
 
+/**
+ * Runs after a page's feedback is persisted: records the new baseline and, on a
+ * multi-page submission, advances to the next page instead of closing the studio.
+ */
+async function finishFeedbackSave(exported) {
+  const pageIndex = state.activePageIndex;
+  markPageSaved(pageIndex, exported.objects);
+  state.pageAnnotations[pageIndex] = exported.objects;
+
+  const images = getActiveSubmissionImages();
+  const isLastPage = pageIndex >= images.length - 1;
+
+  await loadSubmissions();
+  await loadStats();
+
+  if (isLastPage) {
+    showToast(`${pageIndex + 1}페이지 첨삭 피드백이 성공적으로 댓글로 등록되었습니다!`, 'success');
+    closeCanvasEditor(true);
+    return;
+  }
+
+  document.getElementById('canvas-feedback-comment').value = '';
+  showToast(`${pageIndex + 1}페이지 첨삭 저장 완료! ${pageIndex + 2}페이지로 이동합니다.`, 'success');
+  switchCanvasPage(pageIndex + 1);
+}
+
+/** Converts a Supabase public URL back into the object path inside the bucket. */
+function storagePathFromUrl(url) {
+  if (!url) return '';
+  const bucket = state.systemStatus?.supabase_bucket || 'tutormark-files';
+  const marker = `/public/${bucket}/`;
+  if (url.includes(marker)) {
+    return url.split(marker)[1].split('?')[0];
+  }
+  return '';
+}
+
+/** Best-effort removal of stored images; a storage failure must not block the DB delete. */
+async function removeStoredImages(urls) {
+  if (!state.supabaseClient) return;
+  const bucket = state.systemStatus?.supabase_bucket || 'tutormark-files';
+  const paths = urls.map(storagePathFromUrl).filter(Boolean);
+  if (paths.length === 0) return;
+  try {
+    await state.supabaseClient.storage.from(bucket).remove(paths);
+  } catch (err) {
+    console.warn('Storage cleanup failed:', err);
+  }
+}
+
 async function deleteFeedback(feedbackId) {
   if (!confirm('이 첨삭 피드백 댓글을 삭제하시겠습니까?')) return;
 
   try {
     if (state.supabaseClient) {
+      // Read the image URL before the row disappears, or the file is orphaned in storage
+      const { data: fbRow } = await state.supabaseClient
+        .from('feedbacks').select('annotated_image_url').eq('id', feedbackId).single();
+
       const { error } = await state.supabaseClient.from('feedbacks').delete().eq('id', feedbackId);
       if (error) throw new Error(error.message);
+
+      await removeStoredImages([fbRow?.annotated_image_url].filter(Boolean));
+
+      // The submission goes back to pending once its last feedback is gone
+      if (state.currentSubmission) {
+        const { data: rest } = await state.supabaseClient
+          .from('feedbacks').select('id').eq('submission_id', state.currentSubmission.id);
+        if (!rest || rest.length === 0) {
+          await state.supabaseClient.from('submissions')
+            .update({ status: 'pending' }).eq('id', state.currentSubmission.id);
+        }
+      }
 
       showToast('첨삭 피드백이 삭제되었습니다.', 'info');
       if (state.currentSubmission) {
@@ -1208,8 +1466,16 @@ async function confirmDeleteSubmission(submissionId) {
 
   try {
     if (state.supabaseClient) {
+      // Collect every image path first; the cascade delete takes the rows with it
+      const detail = await fetchSubmissionDetail(submissionId).catch(() => null);
+      const urls = detail
+        ? [...(detail.images || []), ...(detail.feedbacks || []).map(f => f.annotated_image_url)]
+        : [];
+
       const { error } = await state.supabaseClient.from('submissions').delete().eq('id', submissionId);
       if (error) throw new Error(error.message);
+
+      await removeStoredImages(urls.filter(Boolean));
 
       showToast('과제가 삭제되었습니다.', 'info');
       closeDetailModal();
@@ -1242,6 +1508,7 @@ const lightbox = {
   panX: 0,
   panY: 0,
   isPanning: false,
+  didPan: false,
   startPanX: 0,
   startPanY: 0,
 
@@ -1275,6 +1542,11 @@ const lightbox = {
       this.close();
     });
     this.modal.addEventListener('click', (e) => {
+      // A drag that ends on the backdrop still fires a click; don't close on it
+      if (this.didPan) {
+        this.didPan = false;
+        return;
+      }
       if (e.target.id === 'image-lightbox-modal' || e.target.id === 'lightbox-viewport') {
         this.close();
       }
@@ -1291,14 +1563,18 @@ const lightbox = {
     this.viewport?.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       this.isPanning = true;
+      this.didPan = false;
       this.startPanX = e.clientX - this.panX;
       this.startPanY = e.clientY - this.panY;
-      this.viewport.setPointerCapture(e.pointerId);
+      try { this.viewport.setPointerCapture(e.pointerId); } catch (err) { /* unsupported */ }
     });
     this.viewport?.addEventListener('pointermove', (e) => {
       if (!this.isPanning) return;
-      this.panX = e.clientX - this.startPanX;
-      this.panY = e.clientY - this.startPanY;
+      const nextX = e.clientX - this.startPanX;
+      const nextY = e.clientY - this.startPanY;
+      if (Math.abs(nextX - this.panX) > 2 || Math.abs(nextY - this.panY) > 2) this.didPan = true;
+      this.panX = nextX;
+      this.panY = nextY;
       this.updateTransform();
     });
     this.viewport?.addEventListener('pointerup', () => {
@@ -1321,7 +1597,11 @@ const lightbox = {
 
     this.img.src = imageUrl;
     this.titleElem.innerText = title;
-    if (this.downloadLink) this.downloadLink.href = imageUrl;
+    if (this.downloadLink) {
+      this.downloadLink.href = imageUrl;
+      this.downloadLink.dataset.downloadSrc = imageUrl;
+      this.downloadLink.dataset.downloadName = `${(title || 'tutormark').replace(/[\/:*?"<>|]/g, '_')}.jpg`;
+    }
     this.resetZoom();
 
     // Ensure it is on the top-most z-index
@@ -1357,6 +1637,29 @@ const lightbox = {
     }
   }
 };
+
+/**
+ * Cross-origin images ignore the anchor `download` attribute and just navigate away,
+ * so pull the bytes down and hand the browser a same-origin blob instead.
+ */
+async function downloadImage(url, filename) {
+  try {
+    const res = await fetch(url, { mode: 'cors' });
+    if (!res.ok) throw new Error(res.statusText);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = blobUrl;
+    a.download = filename || 'tutormark.jpg';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+  } catch (err) {
+    // CORS blocked or offline: let the browser open it so the user can save manually
+    window.open(url, '_blank', 'noopener');
+  }
+}
 
 function openLightbox(imageUrl, title) {
   lightbox.open(imageUrl, title);
@@ -1453,6 +1756,22 @@ function closeSupabaseGuideModal() {
   if (modal) modal.classList.add('hidden');
 }
 
+/** Removes the browser-saved key so the page falls back to the server / local mode. */
+async function clearManualSupabaseConfig() {
+  if (!confirm('저장된 Supabase 연동 키를 삭제하고 서버 기본 설정(로컬 모드)으로 돌아갈까요?')) return;
+
+  localStorage.removeItem('TUTORMARK_SUPABASE_CONFIG');
+  state.supabaseClient = null;
+  state.systemStatus = null;
+
+  closeSupabaseGuideModal();
+  await checkSystemStatus();
+  await loadStudents();
+  await loadSubmissions();
+  await loadStats();
+  showToast('연동 키를 삭제했습니다. 서버 기본 설정으로 전환되었습니다.', 'info');
+}
+
 async function saveManualSupabaseConfig() {
   const url = document.getElementById('input-supabase-url')?.value.trim();
   const key = document.getElementById('input-supabase-key')?.value.trim();
@@ -1494,13 +1813,15 @@ async function saveManualSupabaseConfig() {
 
 // --- Helper Utilities ---
 function escapeHtml(str) {
-  if (!str) return '';
-  return str.replace(/&/g, '&amp;')
+  if (str === null || str === undefined) return '';
+  return String(str).replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
 }
+
+let toastTimer = null;
 
 function showToast(message, type = 'info') {
   const toast = document.getElementById('global-toast');
@@ -1520,7 +1841,9 @@ function showToast(message, type = 'info') {
     icon.innerHTML = `<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>`;
   }
 
-  setTimeout(() => {
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
     toast.className = 'hidden';
+    toastTimer = null;
   }, 3500);
 }

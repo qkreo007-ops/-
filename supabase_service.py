@@ -1,6 +1,7 @@
 import os
 import io
 import json
+import base64
 from datetime import datetime
 from dotenv import load_dotenv
 from typing import Optional, List, Dict, Any
@@ -26,6 +27,39 @@ if SUPABASE_URL and SUPABASE_KEY and "your-project-ref" not in SUPABASE_URL:
 
 def is_supabase_enabled() -> bool:
     return is_connected and supabase_client is not None
+
+
+def get_key_role(key: str = None) -> str:
+    """Reads the `role` claim out of a Supabase JWT without verifying it.
+
+    Used to make sure a service_role key is never handed to the browser.
+    """
+    key = key if key is not None else SUPABASE_KEY
+    try:
+        payload = key.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload)).get("role", "")
+    except Exception:
+        return ""
+
+
+def is_anon_key(key: str = None) -> bool:
+    return get_key_role(key) == "anon"
+
+
+def storage_path_from_url(url: str) -> str:
+    """Turns a Supabase public URL back into the object path inside the bucket.
+
+    The bare filename is not enough: feedback images live under `feedbacks/`,
+    and deleting by basename alone silently leaves them orphaned in storage.
+    """
+    if not url:
+        return ""
+    marker = f"/public/{SUPABASE_BUCKET}/"
+    if marker in url:
+        return url.split(marker, 1)[1].split("?", 1)[0]
+    # Not a public storage URL (e.g. a local path) - fall back to the last segment
+    return url.rstrip("/").split("/")[-1].split("?", 1)[0]
 
 def parse_image_urls(item: dict) -> List[str]:
     urls = []
@@ -172,15 +206,14 @@ def delete_submission(submission_id: int):
     detail = get_submission_detail(submission_id)
     if detail:
         for img_url in detail.get("images", []):
-            if "/" in img_url:
-                filename = img_url.split("/")[-1]
-                delete_image_from_storage(filename)
-            
+            path = storage_path_from_url(img_url)
+            if path:
+                delete_image_from_storage(path)
+
         for fb in detail.get("feedbacks", []):
-            fb_url = fb.get("annotated_image_url", "")
-            if "/" in fb_url:
-                fb_filename = fb_url.split("/")[-1]
-                delete_image_from_storage(fb_filename)
+            path = storage_path_from_url(fb.get("annotated_image_url", ""))
+            if path:
+                delete_image_from_storage(path)
 
     supabase_client.table("submissions").delete().eq("id", submission_id).execute()
     return {"message": "deleted"}
@@ -218,10 +251,9 @@ def delete_feedback(feedback_id: int):
 
     fb = fb_res.data[0]
     submission_id = fb["submission_id"]
-    fb_url = fb.get("annotated_image_url", "")
-    if "/" in fb_url:
-        filename = fb_url.split("/")[-1]
-        delete_image_from_storage(filename)
+    path = storage_path_from_url(fb.get("annotated_image_url", ""))
+    if path:
+        delete_image_from_storage(path)
 
     supabase_client.table("feedbacks").delete().eq("id", feedback_id).execute()
 
@@ -234,12 +266,7 @@ def delete_feedback(feedback_id: int):
 def get_stats() -> Dict[str, int]:
     if not is_supabase_enabled():
         import database as local_db
-        return local_db.get_db_connection() and {
-            "student_count": len(local_db.get_all_students()),
-            "total_submissions": len(local_db.get_submissions()),
-            "pending_count": len(local_db.get_submissions(status="pending")),
-            "reviewed_count": len(local_db.get_submissions(status="reviewed"))
-        }
+        return local_db.get_stats()
 
     st_res = supabase_client.table("students").select("id", count="exact").execute()
     sub_res = supabase_client.table("submissions").select("id", count="exact").execute()

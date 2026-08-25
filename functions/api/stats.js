@@ -15,27 +15,34 @@ export async function onRequestGet(context) {
   }
 
   try {
-    const headers = { 'apikey': key, 'Authorization': `Bearer ${key}` };
+    // Ask PostgREST for the count in the Content-Range header instead of
+    // downloading every row just to call .length on it
+    const headers = {
+      'apikey': key,
+      'Authorization': `Bearer ${key}`,
+      'Prefer': 'count=exact',
+      'Range': '0-0'
+    };
 
-    const [studentsRes, totalRes, pendingRes, reviewedRes] = await Promise.all([
-      fetch(`${url}/rest/v1/students?select=id`, { headers }),
-      fetch(`${url}/rest/v1/submissions?select=id`, { headers }),
-      fetch(`${url}/rest/v1/submissions?select=id&status=eq.pending`, { headers }),
-      fetch(`${url}/rest/v1/submissions?select=id&status=eq.reviewed`, { headers })
-    ]);
+    const countOf = async (path) => {
+      const res = await fetch(`${url}/rest/v1/${path}`, { method: 'HEAD', headers });
+      const range = res.headers.get('content-range') || '';
+      const total = parseInt(range.split('/')[1], 10);
+      return Number.isFinite(total) ? total : 0;
+    };
 
     const [students, total, pending, reviewed] = await Promise.all([
-      studentsRes.json(),
-      totalRes.json(),
-      pendingRes.json(),
-      reviewedRes.json()
+      countOf('students?select=id'),
+      countOf('submissions?select=id'),
+      countOf('submissions?select=id&status=eq.pending'),
+      countOf('submissions?select=id&status=eq.reviewed')
     ]);
 
     return new Response(JSON.stringify({
-      student_count: Array.isArray(students) ? students.length : 0,
-      total_submissions: Array.isArray(total) ? total.length : 0,
-      pending_count: Array.isArray(pending) ? pending.length : 0,
-      reviewed_count: Array.isArray(reviewed) ? reviewed.length : 0
+      student_count: students,
+      total_submissions: total,
+      pending_count: pending,
+      reviewed_count: reviewed
     }), {
       headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
     });

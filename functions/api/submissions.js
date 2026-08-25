@@ -14,11 +14,12 @@ export async function onRequestGet(context) {
   const status = reqUrl.searchParams.get('status');
 
   let query = `${url}/rest/v1/submissions?select=*,feedbacks(id)&order=id.desc`;
-  if (studentId) {
-    query += `&student_id=eq.${studentId}`;
+  // Encode caller-supplied values: raw interpolation lets them inject extra PostgREST filters
+  if (studentId && /^\d+$/.test(studentId)) {
+    query += `&student_id=eq.${encodeURIComponent(studentId)}`;
   }
-  if (status && status !== 'all') {
-    query += `&status=eq.${status}`;
+  if (status && status !== 'all' && /^[a-z_]+$/.test(status)) {
+    query += `&status=eq.${encodeURIComponent(status)}`;
   }
 
   const res = await fetch(query, {

@@ -2,7 +2,7 @@
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>TutorMark - 과외/멘토링 사진 과제 첨삭 노트 (Supabase)</title>
   <!-- Tailwind CSS CDN -->
   <script src="https://cdn.tailwindcss.com"></script>
@@ -554,6 +554,9 @@
           </div>
           <button type="button" onclick="saveManualSupabaseConfig()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow transition flex items-center justify-center gap-2">
             <i data-lucide="check-circle" class="w-4 h-4"></i> 수파베이스 즉시 연동 및 활성화
+          </button>
+          <button type="button" onclick="clearManualSupabaseConfig()" class="w-full py-2 bg-white hover:bg-slate-100 text-slate-600 font-semibold text-xs rounded-xl border border-slate-300 transition flex items-center justify-center gap-2">
+            <i data-lucide="unplug" class="w-3.5 h-3.5"></i> 연동 해제하고 로컬/서버 기본 설정 사용
           </button>
         </div>
 

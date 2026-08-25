@@ -2,6 +2,8 @@
  * TutorMark Canvas Annotation Studio
  * High-performance, zoomable, multi-tool annotation engine for tutoring & mentoring.
  */
+const HISTORY_LIMIT = 120;
+
 class TutorMarkCanvasEditor {
   constructor(containerId) {
     this.container = document.getElementById(containerId);
@@ -21,6 +23,7 @@ class TutorMarkCanvasEditor {
     this.imageLoaded = false;
     this.imgWidth = 0;
     this.imgHeight = 0;
+    this.loadToken = 0; // guards against out-of-order image loads
 
     // Viewport transform (zoom & pan)
     this.scale = 1;
@@ -29,86 +32,150 @@ class TutorMarkCanvasEditor {
     this.minScale = 0.2;
     this.maxScale = 5.0;
 
+    // Viewport size in CSS pixels (set by resizeCanvas once the modal is visible)
+    this.viewWidth = 0;
+    this.viewHeight = 0;
+
     // Tool state
     this.currentTool = 'pen'; // 'pen', 'highlighter', 'text', 'line', 'arrow', 'rect', 'circle', 'grade-o', 'grade-x', 'grade-check', 'eraser', 'pan'
     this.currentColor = '#ef4444'; // Red default
     this.currentWidth = 4;
     this.currentFontSize = 20;
 
-    // Drawing data & history
-    this.objects = []; // Array of drawn elements { type, color, width, points, text, ... }
-    this.undoStack = [];
-    this.redoStack = [];
+    // Drawing data & history (snapshot based: covers draw, erase and clear alike)
+    this.objects = [];
+    this.history = [[]];
+    this.historyIndex = 0;
 
     // Interaction flags
     this.isDrawing = false;
     this.isPanning = false;
+    this.erasedDuringStroke = false;
+    this.activePointerId = null;
     this.startPanX = 0;
     this.startPanY = 0;
     this.currentPoints = [];
+    this.shapeStart = null;
+    this.shapeCurrent = null;
     this.spacePressed = false;
+
+    // Multi-touch pinch state (tablet / touchscreen support)
+    this.activePointers = new Map();
+    this.pinchStartDist = 0;
+    this.pinchStartScale = 1;
 
     // Text input element
     this.activeTextInput = null;
 
-    // Initialize
+    // Render scheduling (coalesce repaints into one per animation frame)
+    this.renderQueued = false;
+
+    // Notified when the drawing changes, so the host page can warn about unsaved work
+    this.onDirtyChange = null;
+
     this.initEventListeners();
     this.resizeCanvas();
+  }
+
+  /** The editor only reacts to global keys while its modal is actually on screen. */
+  isActive() {
+    const modal = this.container.closest('.hidden');
+    return !modal && this.container.offsetParent !== null;
   }
 
   resizeCanvas() {
     const rect = this.container.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) return;
-    
-    // Set actual canvas resolution matching CSS size
-    this.canvas.width = rect.width;
-    this.canvas.height = rect.height;
+
+    // Match the backing store to the device pixel ratio so strokes stay crisp on HiDPI screens
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = Math.round(rect.width * dpr);
+    this.canvas.height = Math.round(rect.height * dpr);
+    this.canvas.style.width = `${rect.width}px`;
+    this.canvas.style.height = `${rect.height}px`;
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Work in CSS pixels everywhere else
+    this.viewWidth = rect.width;
+    this.viewHeight = rect.height;
     this.render();
   }
 
   loadImage(imageUrl, initialData = null) {
+    const token = ++this.loadToken;
+
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.crossOrigin = 'anonymous';
+
       img.onload = () => {
+        if (token !== this.loadToken) return; // a newer load already won
         this.bgImage = img;
         this.imgWidth = img.naturalWidth;
         this.imgHeight = img.naturalHeight;
         this.imageLoaded = true;
 
-        // Reset history
-        this.objects = [];
-        this.undoStack = [];
-        this.redoStack = [];
-
-        // Load existing annotation data if provided
-        if (initialData) {
-          try {
-            const parsed = typeof initialData === 'string' ? JSON.parse(initialData) : initialData;
-            if (Array.isArray(parsed)) {
-              this.objects = parsed;
-            }
-          } catch (e) {
-            console.warn('Failed to parse initial annotation data:', e);
-          }
-        }
-
-        // Fit image nicely into container
+        this.setObjects(this.parseVectorData(initialData));
         this.fitToScreen();
         resolve();
       };
-      img.onerror = (err) => {
-        console.error('Failed to load image:', imageUrl, err);
-        reject(err);
+
+      img.onerror = () => {
+        if (token !== this.loadToken) return;
+        this.imageLoaded = false;
+        this.bgImage = null;
+        this.render();
+        reject(new Error('이미지를 불러오지 못했습니다. (주소가 잘못되었거나 CORS 설정이 필요합니다)'));
       };
+
       img.src = imageUrl;
     });
   }
 
+  /** Accepts an array, a JSON string, or null and always returns a usable object array. */
+  parseVectorData(data) {
+    if (!data) return [];
+    try {
+      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+      console.warn('Failed to parse annotation data:', e);
+      return [];
+    }
+  }
+
+  // --- Vector data interchange (used for per-page caching by app.js) ---
+  exportVectorData() {
+    return this.objects.map(obj => ({ ...obj }));
+  }
+
+  importVectorData(data) {
+    this.setObjects(this.parseVectorData(data));
+    this.render();
+  }
+
+  /** Replaces the drawing wholesale and restarts the history at that state. */
+  setObjects(objects) {
+    this.objects = Array.isArray(objects) ? objects.map(o => ({ ...o })) : [];
+    this.history = [this.objects.map(o => ({ ...o }))];
+    this.historyIndex = 0;
+    this.notifyDirtyChange();
+  }
+
+  /** Removes annotations but keeps the loaded background image and viewport. */
+  clearDrawingsOnly() {
+    this.setObjects([]);
+    this.render();
+  }
+
+  hasAnnotations() {
+    return this.objects.length > 0;
+  }
+
   fitToScreen() {
     if (!this.imageLoaded) return;
-    const cw = this.canvas.width;
-    const ch = this.canvas.height;
+    const cw = this.viewWidth;
+    const ch = this.viewHeight;
 
     const scaleX = (cw * 0.92) / this.imgWidth;
     const scaleY = (ch * 0.92) / this.imgHeight;
@@ -122,16 +189,15 @@ class TutorMarkCanvasEditor {
   }
 
   resetZoom() {
+    if (!this.imageLoaded) return;
     this.scale = 1.0;
-    const cw = this.canvas.width;
-    const ch = this.canvas.height;
-    this.panX = (cw - this.imgWidth * this.scale) / 2;
-    this.panY = (ch - this.imgHeight * this.scale) / 2;
+    this.panX = (this.viewWidth - this.imgWidth * this.scale) / 2;
+    this.panY = (this.viewHeight - this.imgHeight * this.scale) / 2;
     this.render();
     this.notifyZoomChanged();
   }
 
-  setZoom(newScale, centerX = this.canvas.width / 2, centerY = this.canvas.height / 2) {
+  setZoom(newScale, centerX = this.viewWidth / 2, centerY = this.viewHeight / 2) {
     const clampedScale = Math.max(this.minScale, Math.min(this.maxScale, newScale));
     if (clampedScale === this.scale) return;
 
@@ -154,12 +220,14 @@ class TutorMarkCanvasEditor {
   }
 
   setTool(tool) {
+    this.commitTextInput();
     this.currentTool = tool;
     this.updateCursor();
   }
 
   setColor(color) {
     this.currentColor = color;
+    if (this.activeTextInput) this.activeTextInput.style.color = color;
   }
 
   setLineWidth(width) {
@@ -168,10 +236,13 @@ class TutorMarkCanvasEditor {
 
   setFontSize(size) {
     this.currentFontSize = size;
+    if (this.activeTextInput) {
+      this.activeTextInput.style.fontSize = `${Math.max(14, size * this.scale)}px`;
+    }
   }
 
   updateCursor() {
-    this.container.className = this.container.className.replace(/cursor-\w+/g, '').trim();
+    this.container.classList.remove('cursor-pan', 'cursor-text', 'cursor-eraser', 'cursor-draw');
     if (this.currentTool === 'pan' || this.spacePressed) {
       this.container.classList.add('cursor-pan');
     } else if (this.currentTool === 'text') {
@@ -204,6 +275,7 @@ class TutorMarkCanvasEditor {
 
     // Mouse Wheel Zoom
     this.container.addEventListener('wheel', (e) => {
+      if (!this.imageLoaded) return;
       e.preventDefault();
       const rect = this.container.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
@@ -213,9 +285,13 @@ class TutorMarkCanvasEditor {
       this.setZoom(this.scale * zoomFactor, mouseX, mouseY);
     }, { passive: false });
 
+    // Right-drag pans, so suppress the context menu inside the canvas only
+    this.container.addEventListener('contextmenu', (e) => e.preventDefault());
+
     // Keyboard shortcuts (Spacebar for pan, Ctrl+Z for undo, Ctrl+Y for redo)
     window.addEventListener('keydown', (e) => {
-      if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA') return;
+      if (!this.isActive()) return;
+      if (this.isTypingTarget(document.activeElement)) return;
 
       if (e.code === 'Space' && !this.spacePressed) {
         this.spacePressed = true;
@@ -235,7 +311,7 @@ class TutorMarkCanvasEditor {
     });
 
     window.addEventListener('keyup', (e) => {
-      if (e.code === 'Space') {
+      if (e.code === 'Space' && this.spacePressed) {
         this.spacePressed = false;
         this.updateCursor();
       }
@@ -248,6 +324,12 @@ class TutorMarkCanvasEditor {
     this.container.addEventListener('pointercancel', (e) => this.handlePointerUp(e));
   }
 
+  /** True for anything the user could be typing into, contentEditable included. */
+  isTypingTarget(el) {
+    if (!el) return false;
+    return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true;
+  }
+
   getPointerPos(e) {
     const rect = this.container.getBoundingClientRect();
     return {
@@ -258,13 +340,27 @@ class TutorMarkCanvasEditor {
 
   handlePointerDown(e) {
     if (!this.imageLoaded) return;
+
+    // Track every active pointer so two fingers can pinch-zoom
+    this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.activePointers.size === 2) {
+      this.cancelActiveStroke();
+      const pts = [...this.activePointers.values()];
+      this.pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      this.pinchStartScale = this.scale;
+      return;
+    }
+    if (this.activePointers.size > 2) return;
+
     const pos = this.getPointerPos(e);
 
     // Pan with Middle Click, Right Click, or Hand Tool or Space+Click
     if (e.button === 1 || e.button === 2 || this.currentTool === 'pan' || this.spacePressed) {
       this.isPanning = true;
+      this.activePointerId = e.pointerId;
       this.startPanX = pos.x - this.panX;
       this.startPanY = pos.y - this.panY;
+      this.capturePointer(e);
       return;
     }
 
@@ -273,28 +369,32 @@ class TutorMarkCanvasEditor {
     const imgCoord = this.screenToImage(pos.x, pos.y);
 
     if (this.currentTool === 'text') {
+      e.preventDefault();
       this.showInlineTextInput(pos.x, pos.y, imgCoord.x, imgCoord.y);
       return;
     }
 
+    this.activePointerId = e.pointerId;
+    this.capturePointer(e);
+
     if (this.currentTool === 'eraser') {
-      this.eraseAt(imgCoord.x, imgCoord.y);
       this.isDrawing = true;
+      this.erasedDuringStroke = false;
+      this.eraseAt(imgCoord.x, imgCoord.y);
       return;
     }
 
     // Quick Grading Stamps (O, X, Check, etc.)
     if (this.currentTool.startsWith('grade-')) {
-      const stampObj = {
-        id: Date.now() + Math.random(),
+      this.addObject({
+        id: this.nextId(),
         type: this.currentTool,
         color: this.currentColor,
         width: this.currentWidth,
         x: imgCoord.x,
         y: imgCoord.y,
         size: Math.max(32, this.currentFontSize * 2)
-      };
-      this.addObject(stampObj);
+      });
       return;
     }
 
@@ -309,6 +409,25 @@ class TutorMarkCanvasEditor {
   }
 
   handlePointerMove(e) {
+    if (this.activePointers.has(e.pointerId)) {
+      this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+
+    // Two-finger pinch zoom
+    if (this.activePointers.size === 2) {
+      const pts = [...this.activePointers.values()];
+      const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+      if (this.pinchStartDist > 0) {
+        const rect = this.container.getBoundingClientRect();
+        const midX = (pts[0].x + pts[1].x) / 2 - rect.left;
+        const midY = (pts[0].y + pts[1].y) / 2 - rect.top;
+        this.setZoom(this.pinchStartScale * (dist / this.pinchStartDist), midX, midY);
+      }
+      return;
+    }
+
+    if (this.activePointerId !== null && e.pointerId !== this.activePointerId) return;
+
     const pos = this.getPointerPos(e);
 
     if (this.isPanning) {
@@ -337,6 +456,13 @@ class TutorMarkCanvasEditor {
   }
 
   handlePointerUp(e) {
+    this.activePointers.delete(e.pointerId);
+    if (this.activePointers.size < 2) this.pinchStartDist = 0;
+
+    if (this.activePointerId !== null && e.pointerId !== this.activePointerId) return;
+    this.releasePointer(e);
+    this.activePointerId = null;
+
     if (this.isPanning) {
       this.isPanning = false;
       return;
@@ -345,23 +471,34 @@ class TutorMarkCanvasEditor {
     if (!this.isDrawing) return;
     this.isDrawing = false;
 
+    if (this.currentTool === 'eraser') {
+      // One undo step per eraser drag, not per erased stroke
+      if (this.erasedDuringStroke) {
+        this.pushHistory();
+        this.erasedDuringStroke = false;
+      }
+      return;
+    }
+
     if (this.currentTool === 'pen' || this.currentTool === 'highlighter') {
       if (this.currentPoints.length > 0) {
-        const obj = {
-          id: Date.now() + Math.random(),
+        this.addObject({
+          id: this.nextId(),
           type: this.currentTool,
           color: this.currentColor,
           width: this.currentTool === 'highlighter' ? Math.max(14, this.currentWidth * 3.5) : this.currentWidth,
           opacity: this.currentTool === 'highlighter' ? 0.38 : 1.0,
           points: [...this.currentPoints]
-        };
-        this.addObject(obj);
+        });
       }
       this.currentPoints = [];
     } else if (['line', 'arrow', 'rect', 'circle'].includes(this.currentTool)) {
-      if (this.shapeStart && this.shapeCurrent) {
-        const obj = {
-          id: Date.now() + Math.random(),
+      // Ignore accidental zero-size shapes from a stray click
+      if (this.shapeStart && this.shapeCurrent &&
+          (Math.abs(this.shapeCurrent.x - this.shapeStart.x) > 2 ||
+           Math.abs(this.shapeCurrent.y - this.shapeStart.y) > 2)) {
+        this.addObject({
+          id: this.nextId(),
           type: this.currentTool,
           color: this.currentColor,
           width: this.currentWidth,
@@ -369,14 +506,43 @@ class TutorMarkCanvasEditor {
           startY: this.shapeStart.y,
           endX: this.shapeCurrent.x,
           endY: this.shapeCurrent.y
-        };
-        this.addObject(obj);
+        });
       }
       this.shapeStart = null;
       this.shapeCurrent = null;
     }
 
     this.render();
+  }
+
+  /** Drops an in-progress stroke without committing it (used when a pinch starts). */
+  cancelActiveStroke() {
+    this.isDrawing = false;
+    this.isPanning = false;
+    this.currentPoints = [];
+    this.shapeStart = null;
+    this.shapeCurrent = null;
+    this.erasedDuringStroke = false;
+    this.render();
+  }
+
+  capturePointer(e) {
+    // Keeps receiving events when the pointer leaves the canvas mid-stroke
+    try {
+      this.container.setPointerCapture(e.pointerId);
+    } catch (err) { /* not supported for this pointer */ }
+  }
+
+  releasePointer(e) {
+    try {
+      if (this.container.hasPointerCapture && this.container.hasPointerCapture(e.pointerId)) {
+        this.container.releasePointerCapture(e.pointerId);
+      }
+    } catch (err) { /* already released */ }
+  }
+
+  nextId() {
+    return `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
   showInlineTextInput(screenX, screenY, imgX, imgY) {
@@ -386,49 +552,64 @@ class TutorMarkCanvasEditor {
 
     const input = document.createElement('div');
     input.className = 'canvas-text-overlay';
-    input.contentEditable = true;
+    input.contentEditable = 'true';
+    input.dataset.placeholder = '텍스트 입력 후 Enter (줄바꿈: Shift+Enter)';
     input.style.left = `${screenX}px`;
     input.style.top = `${screenY}px`;
     input.style.color = this.currentColor;
     input.style.fontSize = `${Math.max(14, this.currentFontSize * this.scale)}px`;
-    input.setAttribute('placeholder', '텍스트 입력 후 Enter 또는 바깥 클릭...');
 
     this.container.appendChild(input);
-    input.focus();
+
+    let settled = false;
 
     const commit = () => {
-      const text = input.innerText.trim();
-      if (text) {
-        const textObj = {
-          id: Date.now() + Math.random(),
+      if (settled) return;
+      settled = true;
+
+      const text = input.innerText.replace(/\u00a0/g, ' ').replace(/\n+$/, '');
+      if (text.trim()) {
+        this.addObject({
+          id: this.nextId(),
           type: 'text',
           text: text,
           color: this.currentColor,
           fontSize: this.currentFontSize,
           x: imgX,
           y: imgY
-        };
-        this.addObject(textObj);
+        });
       }
-      if (input.parentNode) {
-        input.parentNode.removeChild(input);
-      }
+      input.remove();
+      this.activeTextInput = null;
+      this.render();
+    };
+
+    const cancel = () => {
+      if (settled) return;
+      settled = true;
+      input.remove();
       this.activeTextInput = null;
       this.render();
     };
 
     input.addEventListener('keydown', (e) => {
+      // Keep every keystroke inside the box; the canvas shortcuts must not fire here
+      e.stopPropagation();
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         commit();
       } else if (e.key === 'Escape') {
-        if (input.parentNode) input.parentNode.removeChild(input);
-        this.activeTextInput = null;
+        e.preventDefault();
+        cancel();
       }
     });
 
-    input.addEventListener('blur', () => {
-      commit();
+    // Focus after the current event finishes, otherwise the browser's own
+    // mousedown handling blurs the box the moment it appears
+    requestAnimationFrame(() => {
+      if (settled) return;
+      input.focus();
+      input.addEventListener('blur', commit);
     });
 
     this.activeTextInput = input;
@@ -445,89 +626,128 @@ class TutorMarkCanvasEditor {
     const prevCount = this.objects.length;
 
     this.objects = this.objects.filter(obj => {
-      if (obj.type === 'text') {
-        const dx = obj.x - imgX;
-        const dy = obj.y - imgY;
-        return Math.sqrt(dx * dx + dy * dy) > eraseRadius + 15;
+      const type = obj.type || '';
+
+      if (type === 'text') {
+        return Math.hypot(obj.x - imgX, obj.y - imgY) > eraseRadius + 15;
       }
-      if (obj.points) {
-        for (let pt of obj.points) {
-          const dx = pt.x - imgX;
-          const dy = pt.y - imgY;
-          if (Math.sqrt(dx * dx + dy * dy) < eraseRadius) {
-            return false; // Erase stroke
-          }
+
+      if (Array.isArray(obj.points)) {
+        for (const pt of obj.points) {
+          if (Math.hypot(pt.x - imgX, pt.y - imgY) < eraseRadius) return false;
         }
+        return true;
       }
+
       if (obj.startX !== undefined) {
-        const midX = (obj.startX + obj.endX) / 2;
-        const midY = (obj.startY + obj.endY) / 2;
-        const dx = midX - imgX;
-        const dy = midY - imgY;
-        if (Math.sqrt(dx * dx + dy * dy) < eraseRadius + 20) {
-          return false;
-        }
+        return this.distanceToSegment(imgX, imgY, obj.startX, obj.startY, obj.endX, obj.endY) > eraseRadius;
       }
-      if (obj.type.startsWith('grade-')) {
-        const dx = obj.x - imgX;
-        const dy = obj.y - imgY;
-        if (Math.sqrt(dx * dx + dy * dy) < eraseRadius + 15) {
-          return false;
-        }
+
+      if (type.startsWith('grade-')) {
+        return Math.hypot(obj.x - imgX, obj.y - imgY) > eraseRadius + 15;
       }
+
       return true;
     });
 
     if (this.objects.length !== prevCount) {
-      this.undoStack.push([...this.objects]);
-      this.redoStack = [];
+      this.erasedDuringStroke = true;
+      this.notifyDirtyChange();
       this.render();
     }
   }
 
+  /** Shortest distance from a point to a line segment — lets the eraser hit anywhere on a shape. */
+  distanceToSegment(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return Math.hypot(px - x1, py - y1);
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+  }
+
   addObject(obj) {
     this.objects.push(obj);
-    this.undoStack.push([...this.objects]);
-    this.redoStack = [];
+    this.pushHistory();
     this.render();
   }
 
+  // --- Snapshot history ---
+  pushHistory() {
+    this.history = this.history.slice(0, this.historyIndex + 1);
+    this.history.push(this.objects.map(o => ({ ...o })));
+
+    if (this.history.length > HISTORY_LIMIT) {
+      this.history.shift();
+    }
+    this.historyIndex = this.history.length - 1;
+    this.notifyDirtyChange();
+  }
+
   undo() {
-    if (this.objects.length === 0) return;
-    const removed = this.objects.pop();
-    this.redoStack.push(removed);
+    if (this.historyIndex <= 0) return;
+    this.historyIndex--;
+    this.objects = this.history[this.historyIndex].map(o => ({ ...o }));
+    this.notifyDirtyChange();
     this.render();
   }
 
   redo() {
-    if (this.redoStack.length === 0) return;
-    const restored = this.redoStack.pop();
-    this.objects.push(restored);
+    if (this.historyIndex >= this.history.length - 1) return;
+    this.historyIndex++;
+    this.objects = this.history[this.historyIndex].map(o => ({ ...o }));
+    this.notifyDirtyChange();
     this.render();
   }
 
+  canUndo() {
+    return this.historyIndex > 0;
+  }
+
+  canRedo() {
+    return this.historyIndex < this.history.length - 1;
+  }
+
+  /** Wipes the drawing but leaves it on the undo stack, so Ctrl+Z brings it back. */
   clearAll() {
     if (this.objects.length === 0) return;
-    this.redoStack = [...this.objects];
     this.objects = [];
+    this.pushHistory();
     this.render();
+  }
+
+  notifyDirtyChange() {
+    if (this.onDirtyChange) this.onDirtyChange(this.objects.length > 0);
   }
 
   // --- Rendering Loop ---
+  /** Coalesces repaint requests so a fast drag repaints once per frame, not once per event. */
   render() {
+    if (this.renderQueued) return;
+    this.renderQueued = true;
+    requestAnimationFrame(() => {
+      this.renderQueued = false;
+      this.draw();
+    });
+  }
+
+  draw() {
     if (!this.canvas) return;
     const ctx = this.ctx;
-    const cw = this.canvas.width;
-    const ch = this.canvas.height;
+    const cw = this.viewWidth;
+    const ch = this.viewHeight;
 
-    // Clear background
     ctx.clearRect(0, 0, cw, ch);
 
     if (!this.imageLoaded || !this.bgImage) {
-      ctx.fillStyle = '#64748b';
+      ctx.save();
+      ctx.fillStyle = '#94a3b8';
       ctx.font = '16px Pretendard, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('이미지를 불러오는 중이거나 선택된 이미지가 없습니다.', cw / 2, ch / 2);
+      ctx.restore();
       return;
     }
 
@@ -541,21 +761,19 @@ class TutorMarkCanvasEditor {
     ctx.drawImage(this.bgImage, 0, 0, this.imgWidth, this.imgHeight);
 
     // Draw Objects
-    for (let obj of this.objects) {
+    for (const obj of this.objects) {
       this.drawObject(ctx, obj, 1.0);
     }
 
     // Draw in-progress Stroke
-    if (this.isDrawing && (this.currentTool === 'pen' || this.currentTool === 'highlighter')) {
-      if (this.currentPoints.length > 0) {
-        this.drawObject(ctx, {
-          type: this.currentTool,
-          color: this.currentColor,
-          width: this.currentTool === 'highlighter' ? Math.max(14, this.currentWidth * 3.5) : this.currentWidth,
-          opacity: this.currentTool === 'highlighter' ? 0.38 : 1.0,
-          points: this.currentPoints
-        }, 1.0);
-      }
+    if (this.isDrawing && (this.currentTool === 'pen' || this.currentTool === 'highlighter') && this.currentPoints.length > 0) {
+      this.drawObject(ctx, {
+        type: this.currentTool,
+        color: this.currentColor,
+        width: this.currentTool === 'highlighter' ? Math.max(14, this.currentWidth * 3.5) : this.currentWidth,
+        opacity: this.currentTool === 'highlighter' ? 0.38 : 1.0,
+        points: this.currentPoints
+      }, 1.0);
     }
 
     // Draw in-progress Shape
@@ -575,8 +793,18 @@ class TutorMarkCanvasEditor {
   }
 
   drawObject(ctx, obj, scaleFactor = 1.0) {
-    ctx.save();
+    if (!obj || !obj.type) return;
 
+    ctx.save();
+    try {
+      this.paintObject(ctx, obj, scaleFactor);
+    } finally {
+      // Always unwind the save, even when an object turns out to be malformed
+      ctx.restore();
+    }
+  }
+
+  paintObject(ctx, obj, scaleFactor) {
     if (obj.type === 'pen' || obj.type === 'highlighter') {
       if (!obj.points || obj.points.length === 0) return;
       ctx.beginPath();
@@ -614,12 +842,13 @@ class TutorMarkCanvasEditor {
       ctx.lineWidth = obj.width * scaleFactor;
       ctx.fillStyle = obj.color;
       ctx.lineCap = 'round';
-      
-      const headlen = 16 * scaleFactor;
+
+      // Scale the head with the stroke so thick arrows do not look pin-headed
+      const headlen = Math.max(16, obj.width * 4) * scaleFactor;
       const dx = obj.endX - obj.startX;
       const dy = obj.endY - obj.startY;
       const angle = Math.atan2(dy, dx);
-      
+
       ctx.moveTo(obj.startX, obj.startY);
       ctx.lineTo(obj.endX, obj.endY);
       ctx.stroke();
@@ -632,14 +861,10 @@ class TutorMarkCanvasEditor {
       ctx.closePath();
       ctx.fill();
     } else if (obj.type === 'rect') {
-      ctx.beginPath();
       ctx.strokeStyle = obj.color;
       ctx.lineWidth = obj.width * scaleFactor;
-      ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      const w = obj.endX - obj.startX;
-      const h = obj.endY - obj.startY;
-      ctx.strokeRect(obj.startX, obj.startY, w, h);
+      ctx.strokeRect(obj.startX, obj.startY, obj.endX - obj.startX, obj.endY - obj.startY);
     } else if (obj.type === 'circle') {
       ctx.beginPath();
       ctx.strokeStyle = obj.color;
@@ -654,7 +879,7 @@ class TutorMarkCanvasEditor {
       ctx.font = `600 ${obj.fontSize * scaleFactor}px Pretendard, sans-serif`;
       ctx.textBaseline = 'top';
 
-      const lines = obj.text.split('\n');
+      const lines = String(obj.text || '').split('\n');
       const lineHeight = obj.fontSize * 1.3 * scaleFactor;
 
       // Draw background pill for maximum contrast and readability
@@ -671,8 +896,7 @@ class TutorMarkCanvasEditor {
       ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
       ctx.strokeStyle = obj.color;
       ctx.lineWidth = 1.5 * scaleFactor;
-      
-      // Rounded rect background
+
       const rx = obj.x - padX;
       const ry = obj.y - padY;
       const rw = maxLineWidth + padX * 2;
@@ -680,7 +904,12 @@ class TutorMarkCanvasEditor {
       const r = 6 * scaleFactor;
 
       ctx.beginPath();
-      ctx.roundRect(rx, ry, rw, rh, r);
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(rx, ry, rw, rh, r);
+      } else {
+        // Safari < 16 and other older engines have no roundRect
+        ctx.rect(rx, ry, rw, rh);
+      }
       ctx.fill();
       ctx.stroke();
 
@@ -693,8 +922,7 @@ class TutorMarkCanvasEditor {
       ctx.beginPath();
       ctx.strokeStyle = obj.color;
       ctx.lineWidth = (obj.width + 2) * scaleFactor;
-      const r = (obj.size / 2) * scaleFactor;
-      ctx.arc(obj.x, obj.y, r, 0, Math.PI * 2);
+      ctx.arc(obj.x, obj.y, (obj.size / 2) * scaleFactor, 0, Math.PI * 2);
       ctx.stroke();
     } else if (obj.type === 'grade-x') {
       ctx.beginPath();
@@ -719,13 +947,14 @@ class TutorMarkCanvasEditor {
       ctx.lineTo(obj.x + r, obj.y - r * 0.8);
       ctx.stroke();
     }
-
-    ctx.restore();
   }
 
   // --- High-Resolution Synthesis & Export ---
   exportAnnotatedImage() {
     if (!this.imageLoaded || !this.bgImage) return null;
+
+    // Make sure a half-typed annotation still makes it into the export
+    this.commitTextInput();
 
     // Create offscreen canvas with original image's native resolution
     const offscreen = document.createElement('canvas');
@@ -737,17 +966,22 @@ class TutorMarkCanvasEditor {
     offCtx.drawImage(this.bgImage, 0, 0, this.imgWidth, this.imgHeight);
 
     // 2. Render all annotations at full 1:1 scale
-    for (let obj of this.objects) {
+    for (const obj of this.objects) {
       this.drawObject(offCtx, obj, 1.0);
     }
 
-    // Export as high quality JPEG
-    const dataUrl = offscreen.toDataURL('image/jpeg', 0.92);
-    const vectorData = JSON.stringify(this.objects);
+    let dataUrl;
+    try {
+      dataUrl = offscreen.toDataURL('image/jpeg', 0.92);
+    } catch (e) {
+      // A cross-origin image without CORS headers taints the canvas
+      throw new Error('첨삭본을 저장할 수 없습니다. 이미지 서버의 CORS 설정을 확인해주세요.');
+    }
 
     return {
       dataUrl: dataUrl,
-      vectorData: vectorData,
+      vectorData: JSON.stringify(this.objects),
+      objects: this.exportVectorData(),
       width: this.imgWidth,
       height: this.imgHeight
     };

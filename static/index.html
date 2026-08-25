@@ -512,14 +512,14 @@
   </div>
 
   <!-- ======================================================= -->
-  <!-- 5. SUPABASE SETUP GUIDE MODAL (수파베이스 설정 가이드) -->
+  <!-- 5. SUPABASE CONNECTION & GUIDE MODAL -->
   <!-- ======================================================= -->
   <div id="supabase-guide-modal" class="hidden fixed inset-0 z-60 bg-slate-900/70 backdrop-blur-sm flex items-center justify-center p-4">
     <div class="bg-white rounded-3xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in-95">
       <div class="px-6 py-4 bg-emerald-600 text-white flex items-center justify-between">
         <div class="flex items-center gap-2.5">
           <i data-lucide="database" class="w-5 h-5"></i>
-          <h3 class="font-bold text-base">Supabase DB & 스토리지 연동 가이드</h3>
+          <h3 class="font-bold text-base">Supabase 클라우드 연동 설정</h3>
         </div>
         <button onclick="closeSupabaseGuideModal()" class="text-white/80 hover:text-white">
           <i data-lucide="x" class="w-5 h-5"></i>
@@ -527,30 +527,33 @@
       </div>
 
       <div class="p-6 overflow-y-auto space-y-4 text-sm text-slate-700 leading-relaxed">
-        <p class="font-semibold text-slate-900">
-          Supabase 클라우드를 연동하면 전 세계 어디서나 선생님과 학생이 고화질 사진 및 첨삭 데이터를 공유할 수 있습니다!
+        <p class="text-xs text-slate-600">
+          Supabase 클라우드와 연동되면 전 세계 어디서나 선생님과 학생의 스마트폰에서 실시간 과제 사진 및 첨삭 데이터를 공유할 수 있습니다.
         </p>
 
-        <div class="space-y-3">
-          <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
-            <p class="font-bold text-slate-900 mb-1">1단계: Supabase 프로젝트 생성 및 SQL 실행</p>
-            <p class="text-xs text-slate-500 mb-2">1. <a href="https://supabase.com" target="_blank" class="text-blue-600 underline font-semibold">Supabase.com</a>에서 무료 프로젝트를 생성합니다.</p>
-            <p class="text-xs text-slate-500 mb-2">2. 대시보드 좌측 <span class="font-semibold text-slate-800">SQL Editor</span>에 프로젝트 루트의 <code class="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">supabase_schema.sql</code> 파일 내용을 복사하여 실행합니다.</p>
+        <!-- Direct Connect Form -->
+        <div class="bg-slate-50 p-4 rounded-2xl border border-slate-200 space-y-3">
+          <p class="font-bold text-slate-800 text-xs flex items-center gap-1.5">
+            <i data-lucide="key" class="w-4 h-4 text-emerald-600"></i> 브라우저 직접 연동 키 입력 / 확인
+          </p>
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 mb-1">Supabase URL</label>
+            <input type="text" id="input-supabase-url" placeholder="https://your-project.supabase.co"
+                   class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none">
           </div>
-
-          <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
-            <p class="font-bold text-slate-900 mb-1">2단계: Storage 버킷 생성</p>
-            <p class="text-xs text-slate-500">좌측 <span class="font-semibold text-slate-800">Storage</span> 메뉴에서 <code class="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">tutormark-files</code> 버킷을 생성하고, <span class="font-semibold text-emerald-600">Public bucket</span> 옵션을 켭니다.</p>
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 mb-1">Supabase Anon Key</label>
+            <input type="text" id="input-supabase-key" placeholder="eyJhbGciOiJIUzI1NiIsIn..."
+                   class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none">
           </div>
-
-          <div class="bg-slate-50 p-4 rounded-xl border border-slate-200">
-            <p class="font-bold text-slate-900 mb-1">3단계: .env 파일에 키 입력</p>
-            <p class="text-xs text-slate-500 mb-2">프로젝트 폴더의 <code class="bg-slate-200 px-1 py-0.5 rounded text-slate-800 font-mono">.env</code> 파일에 Supabase URL과 Key를 입력합니다:</p>
-            <pre class="bg-slate-900 text-emerald-400 p-3 rounded-lg text-xs font-mono overflow-x-auto">
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_KEY=your-anon-or-service-key
-SUPABASE_BUCKET=tutormark-files</pre>
+          <div>
+            <label class="block text-[11px] font-bold text-slate-600 mb-1">Storage Bucket 이름</label>
+            <input type="text" id="input-supabase-bucket" value="tutormark-files"
+                   class="w-full bg-white border border-slate-300 rounded-xl px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:outline-none">
           </div>
+          <button type="button" onclick="saveManualSupabaseConfig()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow transition flex items-center justify-center gap-2">
+            <i data-lucide="check-circle" class="w-4 h-4"></i> 수파베이스 즉시 연동 및 활성화
+          </button>
         </div>
 
         <p class="text-xs text-slate-500 bg-amber-50 p-3 rounded-xl border border-amber-200 text-amber-800">
@@ -559,8 +562,8 @@ SUPABASE_BUCKET=tutormark-files</pre>
       </div>
 
       <div class="px-6 py-3 bg-slate-50 border-t border-slate-200 flex justify-end">
-        <button onclick="closeSupabaseGuideModal()" class="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow transition">
-          확인
+        <button onclick="closeSupabaseGuideModal()" class="px-5 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-bold text-xs rounded-xl transition">
+          닫기
         </button>
       </div>
     </div>
@@ -614,6 +617,7 @@ SUPABASE_BUCKET=tutormark-files</pre>
   </div>
 
   <!-- Scripts -->
+  <script src="/static/js/config.js"></script>
   <script src="/static/js/canvas-editor.js"></script>
   <script src="/static/js/app.js"></script>
 </body>

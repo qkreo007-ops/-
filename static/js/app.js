@@ -42,32 +42,80 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 async function checkSystemStatus() {
+  let supabaseUrl = '';
+  let supabaseKey = '';
+  let supabaseBucket = 'tutormark-files';
+  let supabaseEnabled = false;
+
+  // 1. Try server API / Cloudflare Function first
   try {
     const res = await fetch('/api/system/status');
-    state.systemStatus = await res.json();
-    
-    if (state.systemStatus.supabase_enabled && window.supabase && state.systemStatus.supabase_url && state.systemStatus.supabase_key) {
-      state.supabaseClient = window.supabase.createClient(
-        state.systemStatus.supabase_url,
-        state.systemStatus.supabase_key
-      );
-    }
-    
-    const badge = document.getElementById('supabase-status-badge');
-    if (badge) {
-      if (state.systemStatus.supabase_enabled) {
-        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ⚡ Supabase DB & Storage 연동됨`;
-        badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-900/80 text-emerald-300 border border-emerald-700 flex items-center gap-1.5 cursor-pointer';
-        badge.title = `Supabase URL: ${state.systemStatus.supabase_url}\nBucket: ${state.systemStatus.supabase_bucket}`;
-      } else {
-        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> 💾 로컬 모드 (SQLite)`;
-        badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-900/60 text-amber-300 border border-amber-700 flex items-center gap-1.5 cursor-pointer hover:bg-amber-800 transition';
-        badge.title = '클릭하여 Supabase 연동 안내를 확인하세요.';
-        badge.onclick = () => openSupabaseGuideModal();
+    if (res.ok) {
+      const data = await res.json();
+      if (data.supabase_enabled && data.supabase_url && data.supabase_key) {
+        supabaseUrl = data.supabase_url;
+        supabaseKey = data.supabase_key;
+        supabaseBucket = data.supabase_bucket || 'tutormark-files';
+        supabaseEnabled = true;
       }
     }
   } catch (err) {
-    console.warn('System status check failed:', err);
+    console.log('Server status API not reachable, checking client config...');
+  }
+
+  // 2. Check localStorage
+  if (!supabaseEnabled) {
+    const saved = localStorage.getItem('TUTORMARK_SUPABASE_CONFIG');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed.url && parsed.key) {
+          supabaseUrl = parsed.url;
+          supabaseKey = parsed.key;
+          supabaseBucket = parsed.bucket || 'tutormark-files';
+          supabaseEnabled = true;
+        }
+      } catch (e) {}
+    }
+  }
+
+  // 3. Fallback to Project Default Config (from config.js)
+  if (!supabaseEnabled && window.SUPABASE_CONFIG && window.SUPABASE_CONFIG.url && window.SUPABASE_CONFIG.anonKey) {
+    supabaseUrl = window.SUPABASE_CONFIG.url;
+    supabaseKey = window.SUPABASE_CONFIG.anonKey;
+    supabaseBucket = window.SUPABASE_CONFIG.bucket || 'tutormark-files';
+    supabaseEnabled = true;
+  }
+
+  // 4. Initialize Supabase Client
+  if (supabaseEnabled && window.supabase && supabaseUrl && supabaseKey) {
+    try {
+      state.supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
+      state.systemStatus = {
+        supabase_enabled: true,
+        supabase_url: supabaseUrl,
+        supabase_key: supabaseKey,
+        supabase_bucket: supabaseBucket
+      };
+    } catch (e) {
+      console.error('Failed to init Supabase client:', e);
+    }
+  }
+
+  // Update Status Badge UI
+  const badge = document.getElementById('supabase-status-badge');
+  if (badge) {
+    if (state.systemStatus && state.systemStatus.supabase_enabled) {
+      badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> ⚡ Supabase DB & Storage 연동됨`;
+      badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-900/80 text-emerald-300 border border-emerald-700 flex items-center gap-1.5 cursor-pointer hover:bg-emerald-800 transition';
+      badge.title = `Supabase URL: ${state.systemStatus.supabase_url}\nBucket: ${state.systemStatus.supabase_bucket}\n클릭하여 설정을 변경할 수 있습니다.`;
+      badge.onclick = () => openSupabaseGuideModal();
+    } else {
+      badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span> 💾 로컬 모드 (SQLite)`;
+      badge.className = 'px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-900/60 text-amber-300 border border-amber-700 flex items-center gap-1.5 cursor-pointer hover:bg-amber-800 transition';
+      badge.title = '클릭하여 Supabase 연동 키를 입력하고 활성화하세요.';
+      badge.onclick = () => openSupabaseGuideModal();
+    }
   }
 }
 
@@ -583,6 +631,55 @@ function removeSelectedPhoto(index) {
   renderPhotoThumbnails();
 }
 
+function base64ToBlob(dataUrl) {
+  const arr = dataUrl.split(',');
+  const mime = arr[0].match(/:(.*?);/)[1];
+  const bstr = atob(arr[1]);
+  let n = bstr.length;
+  const u8arr = new Uint8Array(n);
+  while (n--) {
+    u8arr[n] = bstr.charCodeAt(n);
+  }
+  return new Blob([u8arr], { type: mime });
+}
+
+// Universal Submission Detail Fetcher (Supabase Direct & Local API)
+async function fetchSubmissionDetail(submissionId) {
+  if (state.supabaseClient) {
+    const { data: subData, error: subErr } = await state.supabaseClient
+      .from('submissions')
+      .select('*')
+      .eq('id', submissionId)
+      .single();
+
+    if (subErr) throw new Error(subErr.message || '과제 정보를 불러오지 못했습니다.');
+
+    const { data: fbData } = await state.supabaseClient
+      .from('feedbacks')
+      .select('*')
+      .eq('submission_id', submissionId)
+      .order('id', { ascending: true });
+
+    let images = [];
+    if (subData.image_urls) {
+      images = typeof subData.image_urls === 'string' ? JSON.parse(subData.image_urls) : subData.image_urls;
+    } else if (subData.image_url) {
+      images = [subData.image_url];
+    }
+
+    return {
+      ...subData,
+      images,
+      feedbacks: fbData || []
+    };
+  }
+
+  // Fallback to local server API
+  const res = await fetch(`/api/submissions/${submissionId}`);
+  if (!res.ok) throw new Error('과제 정보를 불러오지 못했습니다.');
+  return await res.json();
+}
+
 async function handleSubmissionSubmit(e) {
   e.preventDefault();
 
@@ -609,19 +706,70 @@ async function handleSubmissionSubmit(e) {
   submitBtn.disabled = true;
   submitBtn.innerHTML = `<span class="inline-block animate-spin mr-2">⏳</span> 사진 ${state.selectedPhotoFiles.length}장 업로드 중...`;
 
-  const formData = new FormData();
-  formData.append('student_id', state.currentStudent.id);
-  formData.append('student_name', state.currentStudent.name);
-  formData.append('subject', subject);
-  formData.append('title', title);
-  formData.append('memo', memo);
-
-  // Append all files to formData under 'files'
-  state.selectedPhotoFiles.forEach(file => {
-    formData.append('files', file);
-  });
-
   try {
+    // 1. If Supabase Client is active, upload directly to Supabase Storage & DB
+    if (state.supabaseClient) {
+      const bucket = state.systemStatus?.supabase_bucket || window.SUPABASE_CONFIG?.bucket || 'tutormark-files';
+      const uploadedUrls = [];
+
+      for (let i = 0; i < state.selectedPhotoFiles.length; i++) {
+        const file = state.selectedPhotoFiles[i];
+        const ext = file.name.split('.').pop() || 'jpg';
+        const filename = `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}_p${i + 1}.${ext}`;
+
+        const { data: uploadData, error: uploadErr } = await state.supabaseClient.storage
+          .from(bucket)
+          .upload(filename, file, { contentType: file.type || 'image/jpeg', upsert: true });
+
+        if (uploadErr) throw new Error('사진 저장 실패: ' + uploadErr.message);
+
+        const { data: { publicUrl } } = state.supabaseClient.storage
+          .from(bucket)
+          .getPublicUrl(filename);
+
+        uploadedUrls.push(publicUrl);
+      }
+
+      const { data: newSub, error: insertErr } = await state.supabaseClient
+        .from('submissions')
+        .insert([{
+          student_id: state.currentStudent.id,
+          student_name: state.currentStudent.name,
+          subject: subject,
+          title: title,
+          memo: memo,
+          image_url: uploadedUrls[0] || '',
+          image_urls: uploadedUrls,
+          status: 'pending',
+          created_at: new Date().toISOString()
+        }])
+        .select();
+
+      if (insertErr) throw new Error('과제 저장 실패: ' + insertErr.message);
+
+      showToast(`사진 ${state.selectedPhotoFiles.length}장이 성공적으로 제출되었습니다!`, 'success');
+      document.getElementById('submission-title').value = '';
+      document.getElementById('submission-memo').value = '';
+      state.selectedPhotoFiles = [];
+      renderPhotoThumbnails();
+
+      await loadSubmissions();
+      await loadStats();
+      return;
+    }
+
+    // 2. Otherwise fallback to local API
+    const formData = new FormData();
+    formData.append('student_id', state.currentStudent.id);
+    formData.append('student_name', state.currentStudent.name);
+    formData.append('subject', subject);
+    formData.append('title', title);
+    formData.append('memo', memo);
+
+    state.selectedPhotoFiles.forEach(file => {
+      formData.append('files', file);
+    });
+
     const res = await fetch('/api/submissions', {
       method: 'POST',
       body: formData
@@ -633,8 +781,6 @@ async function handleSubmissionSubmit(e) {
     }
 
     showToast(`사진 ${state.selectedPhotoFiles.length}장이 성공적으로 제출되었습니다!`, 'success');
-
-    // Reset Form
     document.getElementById('submission-title').value = '';
     document.getElementById('submission-memo').value = '';
     state.selectedPhotoFiles = [];
@@ -654,10 +800,7 @@ async function handleSubmissionSubmit(e) {
 // --- Detail Modal & Multi-Photo Gallery ---
 async function openDetailModal(submissionId) {
   try {
-    const res = await fetch(`/api/submissions/${submissionId}`);
-    if (!res.ok) throw new Error('과제 정보를 불러오지 못했습니다.');
-    
-    const sub = await res.json();
+    const sub = await fetchSubmissionDetail(submissionId);
     state.currentSubmission = sub;
 
     const modal = document.getElementById('submission-detail-modal');
@@ -788,10 +931,7 @@ function closeDetailModal() {
 // --- Canvas Annotation Studio Modal (Multi-Page Supported) ---
 async function openCanvasEditor(submissionId, pageIndex = 0) {
   try {
-    const res = await fetch(`/api/submissions/${submissionId}`);
-    if (!res.ok) throw new Error('과제를 불러오지 못했습니다.');
-    
-    const sub = await res.json();
+    const sub = await fetchSubmissionDetail(submissionId);
     state.activeAnnotatingSubmission = sub;
     state.activePageIndex = pageIndex;
     state.pageAnnotations = {}; // Clear cached annotations for new session
@@ -810,29 +950,37 @@ async function openCanvasEditor(submissionId, pageIndex = 0) {
     const targetImageUrl = resolveImageUrl(images[state.activePageIndex] || images[0]);
     await state.canvasEditor.loadImage(targetImageUrl);
 
+    // Apply cached annotations if any
+    if (state.pageAnnotations[state.activePageIndex]) {
+      state.canvasEditor.importVectorData(state.pageAnnotations[state.activePageIndex]);
+    }
+
     if (window.lucide) lucide.createIcons();
     showToast(`첨삭 에디터가 준비되었습니다. (현재 ${state.activePageIndex + 1}페이지)`, 'info');
   } catch (err) {
-    showToast(err.message, 'error');
+    showToast('캔버스 열기 실패: ' + err.message, 'error');
   }
 }
 
-async function switchCanvasPage(newIndex) {
+function switchCanvasPage(newPageIndex) {
+  if (!state.activeAnnotatingSubmission) return;
   const images = getActiveSubmissionImages();
-  if (newIndex < 0 || newIndex >= images.length) return;
+  if (newPageIndex < 0 || newPageIndex >= images.length) return;
 
-  // Save current page vector objects to cache
-  state.pageAnnotations[state.activePageIndex] = [...state.canvasEditor.objects];
+  // Cache current page annotations
+  state.pageAnnotations[state.activePageIndex] = state.canvasEditor.exportVectorData();
 
-  state.activePageIndex = newIndex;
+  state.activePageIndex = newPageIndex;
   updateCanvasPageUI();
 
-  // Load new image
-  const targetImageUrl = resolveImageUrl(images[newIndex]);
-  const cachedData = state.pageAnnotations[newIndex] || null;
-  await state.canvasEditor.loadImage(targetImageUrl, cachedData);
-
-  showToast(`${newIndex + 1}페이지로 전환되었습니다.`, 'info');
+  const targetImageUrl = resolveImageUrl(images[state.activePageIndex]);
+  state.canvasEditor.loadImage(targetImageUrl).then(() => {
+    if (state.pageAnnotations[state.activePageIndex]) {
+      state.canvasEditor.importVectorData(state.pageAnnotations[state.activePageIndex]);
+    } else {
+      state.canvasEditor.clearDrawingsOnly();
+    }
+  });
 }
 
 function updateCanvasPageUI() {
@@ -947,6 +1095,51 @@ async function handleSaveFeedback() {
 
     const comment = document.getElementById('canvas-feedback-comment').value.trim();
 
+    // 1. Direct Supabase Storage & DB upload
+    if (state.supabaseClient) {
+      const bucket = state.systemStatus?.supabase_bucket || window.SUPABASE_CONFIG?.bucket || 'tutormark-files';
+      const blob = base64ToBlob(exported.dataUrl);
+      const filename = `fb_${state.activeAnnotatingSubmission.id}_p${state.activePageIndex + 1}_${Date.now()}.jpg`;
+
+      const { data: uploadData, error: uploadErr } = await state.supabaseClient.storage
+        .from(bucket)
+        .upload(filename, blob, { contentType: 'image/jpeg', upsert: true });
+
+      if (uploadErr) throw new Error('첨삭본 이미지 저장 실패: ' + uploadErr.message);
+
+      const { data: { publicUrl } } = state.supabaseClient.storage
+        .from(bucket)
+        .getPublicUrl(filename);
+
+      const { data: newFb, error: fbErr } = await state.supabaseClient
+        .from('feedbacks')
+        .insert([{
+          submission_id: state.activeAnnotatingSubmission.id,
+          page_index: state.activePageIndex,
+          teacher_name: '선생님',
+          comment: comment,
+          annotated_image_url: publicUrl,
+          annotation_data: JSON.stringify(exported.vectorData),
+          created_at: new Date().toISOString()
+        }])
+        .select();
+
+      if (fbErr) throw new Error('첨삭 피드백 저장 실패: ' + fbErr.message);
+
+      await state.supabaseClient
+        .from('submissions')
+        .update({ status: 'reviewed' })
+        .eq('id', state.activeAnnotatingSubmission.id);
+
+      showToast(`${state.activePageIndex + 1}페이지 첨삭 피드백이 성공적으로 댓글로 등록되었습니다!`, 'success');
+      closeCanvasEditor();
+
+      await loadSubmissions();
+      await loadStats();
+      return;
+    }
+
+    // 2. Fallback to API
     const res = await fetch('/api/feedbacks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -983,6 +1176,19 @@ async function deleteFeedback(feedbackId) {
   if (!confirm('이 첨삭 피드백 댓글을 삭제하시겠습니까?')) return;
 
   try {
+    if (state.supabaseClient) {
+      const { error } = await state.supabaseClient.from('feedbacks').delete().eq('id', feedbackId);
+      if (error) throw new Error(error.message);
+
+      showToast('첨삭 피드백이 삭제되었습니다.', 'info');
+      if (state.currentSubmission) {
+        await openDetailModal(state.currentSubmission.id);
+      }
+      await loadSubmissions();
+      await loadStats();
+      return;
+    }
+
     const res = await fetch(`/api/feedbacks/${feedbackId}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('삭제 실패');
     
@@ -1001,6 +1207,17 @@ async function confirmDeleteSubmission(submissionId) {
   if (!confirm('정말 이 과제와 관련된 모든 첨삭 기록을 삭제하시겠습니까?')) return;
 
   try {
+    if (state.supabaseClient) {
+      const { error } = await state.supabaseClient.from('submissions').delete().eq('id', submissionId);
+      if (error) throw new Error(error.message);
+
+      showToast('과제가 삭제되었습니다.', 'info');
+      closeDetailModal();
+      await loadSubmissions();
+      await loadStats();
+      return;
+    }
+
     const res = await fetch(`/api/submissions/${submissionId}`, { method: 'DELETE' });
     if (!res.ok) throw new Error('삭제 실패');
 
@@ -1208,15 +1425,71 @@ async function promptAddStudent() {
   }
 }
 
-// --- Supabase Setup Guide Modal ---
+// --- Supabase Connection Manager Modal ---
 function openSupabaseGuideModal() {
   const modal = document.getElementById('supabase-guide-modal');
-  if (modal) modal.classList.remove('hidden');
+  if (!modal) return;
+
+  const urlInput = document.getElementById('input-supabase-url');
+  const keyInput = document.getElementById('input-supabase-key');
+  const bucketInput = document.getElementById('input-supabase-bucket');
+
+  if (urlInput && keyInput && bucketInput) {
+    const currentUrl = state.systemStatus?.supabase_url || window.SUPABASE_CONFIG?.url || '';
+    const currentKey = state.systemStatus?.supabase_key || window.SUPABASE_CONFIG?.anonKey || '';
+    const currentBucket = state.systemStatus?.supabase_bucket || window.SUPABASE_CONFIG?.bucket || 'tutormark-files';
+
+    urlInput.value = currentUrl;
+    keyInput.value = currentKey;
+    bucketInput.value = currentBucket;
+  }
+
+  modal.classList.remove('hidden');
+  if (window.lucide) lucide.createIcons();
 }
 
 function closeSupabaseGuideModal() {
   const modal = document.getElementById('supabase-guide-modal');
   if (modal) modal.classList.add('hidden');
+}
+
+async function saveManualSupabaseConfig() {
+  const url = document.getElementById('input-supabase-url')?.value.trim();
+  const key = document.getElementById('input-supabase-key')?.value.trim();
+  const bucket = document.getElementById('input-supabase-bucket')?.value.trim() || 'tutormark-files';
+
+  if (!url || !key) {
+    showToast('Supabase URL과 Anon Key를 모두 입력해주세요.', 'error');
+    return;
+  }
+
+  try {
+    if (window.supabase) {
+      const testClient = window.supabase.createClient(url, key);
+      const { data, error } = await testClient.from('students').select('id').limit(1);
+      if (error && error.code !== 'PGRST116') {
+        throw new Error(error.message);
+      }
+      state.supabaseClient = testClient;
+    }
+
+    localStorage.setItem('TUTORMARK_SUPABASE_CONFIG', JSON.stringify({ url, key, bucket }));
+    state.systemStatus = {
+      supabase_enabled: true,
+      supabase_url: url,
+      supabase_key: key,
+      supabase_bucket: bucket
+    };
+
+    closeSupabaseGuideModal();
+    showToast('⚡ Supabase 클라우드 연동이 활성화되었습니다!', 'success');
+    await checkSystemStatus();
+    await loadStudents();
+    await loadSubmissions();
+    await loadStats();
+  } catch (err) {
+    showToast('연동 실패: ' + err.message, 'error');
+  }
 }
 
 // --- Helper Utilities ---

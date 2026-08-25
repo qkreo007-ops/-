@@ -19,9 +19,9 @@ if SUPABASE_URL and SUPABASE_KEY and "your-project-ref" not in SUPABASE_URL:
         from supabase import create_client, Client
         supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
         is_connected = True
-        print(f"⚡ [Supabase] Connected to {SUPABASE_URL}")
+        print(f"[Supabase] Connected to {SUPABASE_URL}")
     except Exception as e:
-        print(f"⚠️ [Supabase] Connection error: {e}. Falling back to SQLite/Local Storage.")
+        print(f"[Supabase] Connection error: {e}. Falling back to SQLite/Local Storage.")
         is_connected = False
 
 def is_supabase_enabled() -> bool:
@@ -58,7 +58,7 @@ def upload_image_to_storage(file_bytes: bytes, filename: str, content_type: str 
         public_url = supabase_client.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
         return public_url
     except Exception as e:
-        print(f"⚠️ [Supabase Storage Upload Error]: {e}")
+        print(f"[Supabase Storage Upload Error]: {e}")
         raise e
 
 def delete_image_from_storage(filename: str):
@@ -67,7 +67,7 @@ def delete_image_from_storage(filename: str):
     try:
         supabase_client.storage.from_(SUPABASE_BUCKET).remove([filename])
     except Exception as e:
-        print(f"⚠️ [Supabase Storage Delete Error]: {e}")
+        print(f"[Supabase Storage Delete Error]: {e}")
 
 # --- Supabase Database Helpers ---
 
